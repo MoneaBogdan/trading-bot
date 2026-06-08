@@ -185,6 +185,62 @@ Validation history:
 - 30-day tick-aligned backtest: 62% win rate overall, best bucket [0.30, 0.40] at 67%.
 - Live (small N, dry-run): 1/4 wins under the previous [0.30, 0.45] band; tightened to [0.30, 0.40] on 2026-06-08.
 
+## Auto-deploy on git push
+
+`deploy.sh` (at the repo root on the server) pulls the latest commit from the
+tracked branch and, if HEAD moved, runs `docker compose up -d --build
+--force-recreate`. It's idempotent — exits in < 1 second when there's nothing
+new. Schedule it to poll every few minutes.
+
+### Option A: cron (simplest)
+
+```cron
+# /etc/cron.d/polymarket-deploy
+*/5 * * * * root /opt/trading-bot/deploy.sh >> /var/log/polymarket-deploy.log 2>&1
+```
+
+### Option B: systemd timer (nicer logs via `journalctl`)
+
+```ini
+# /etc/systemd/system/polymarket-deploy.service
+[Unit]
+Description=Polymarket bot auto-deploy
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/trading-bot
+ExecStart=/opt/trading-bot/deploy.sh
+```
+
+```ini
+# /etc/systemd/system/polymarket-deploy.timer
+[Unit]
+Description=Run polymarket-deploy every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable and start:
+```bash
+systemctl daemon-reload
+systemctl enable --now polymarket-deploy.timer
+journalctl -u polymarket-deploy.service -f
+```
+
+**Trade-off:** up to 5 min latency between `git push` and deploy. Lower the
+`OnUnitActiveSec` (or the cron interval) if you want it tighter — anything
+below 1 min just adds load without value, since the rebuild itself takes ~10 s.
+
+**Manual deploy** any time: `/opt/trading-bot/deploy.sh`.
+
 ## Resilience: network drops, power outages, autostart
 
 The bot is designed to recover from network blips, host reboots, and partial

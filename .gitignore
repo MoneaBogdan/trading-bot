@@ -2,6 +2,11 @@
 __pycache__/
 *.pyc
 .env
+.env.local
 data_cache/
 logs/
 *.csv
+*.parquet
+polymarket/polymarket_creds.json
+polymarket/cache/
+polymarket/backtest/cache/

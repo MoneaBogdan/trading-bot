@@ -1,0 +1,31 @@
+# Two services share the same image (built once).
+#   trader        — live BTC Up/Down latency-arb bot (Binance signal + Coinbase confirm, lifts ask on Polymarket)
+#   ws-recorder   — Polymarket L2 orderbook recorder, used to retroactively validate fills
+
+x-image: &image
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: polymarket-bot:latest
+  restart: unless-stopped
+  env_file:
+    - ./polymarket/.env
+  volumes:
+    # Logs and JSONL trade records persist on the host. Delete from host to rotate.
+    - ./polymarket/logs:/app/polymarket/logs
+    # API creds derived from setup_wallet.py (will be created on first run if missing).
+    - ./polymarket/polymarket_creds.json:/app/polymarket/polymarket_creds.json
+  # If the host doesn't sync time well (LXC, some Proxmox configs), uncomment:
+  # environment:
+  #   - TZ=UTC
+
+services:
+  trader:
+    <<: *image
+    container_name: polymarket-trader
+    command: ["bash", "run_live.sh"]
+
+  ws-recorder:
+    <<: *image
+    container_name: polymarket-ws-recorder
+    command: ["python", "orderbook_recorder_ws.py"]

@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+**/.venv
+**/__pycache__
+**/*.pyc
+**/logs
+**/cache
+**/data_cache
+**/*.parquet
+**/*.csv
+polymarket/.env
+polymarket/polymarket_creds.json
+backtest/.venv
+regime-classifier

@@ -13,7 +13,7 @@ COOLDOWN="${COOLDOWN:-60}"
 SWEET_LO="${SWEET_LO:-0.30}"
 SWEET_HI="${SWEET_HI:-0.40}"  # tightened 2026-06-08: best-bucket [0.30,0.40] = 67% backtest + 1/1 live win; [0.40,0.45] = 0/3 live
 REQUIRE_CONFIRM="${REQUIRE_CONFIRM:-1}"  # 1 = require Coinbase 60s return to agree with Binance (filters single-exchange noise; Polymarket settles vs Chainlink-aggregated price)
-SNIPE_WINDOW_S="${SNIPE_WINDOW_S:-90}"   # only fire when ≤Ns to close (T-N snipe; compresses reversal risk between signal and resolution)
+SNIPE_WINDOW_S="${SNIPE_WINDOW_S:-300}"  # max secs-to-close at fire time. 300 = no tight snipe; anchor alone is the EV-maximizer per 2026-06-09 backtest (n=63, 78% win, +$26.85 vs n=14, 86% win, +$7 with snipe=90)
 REQUIRE_WINDOW_ANCHOR="${REQUIRE_WINDOW_ANCHOR:-1}"  # 1 = require BTC-now vs window-open return to agree in sign with 60s return
 
 trap 'kill $(jobs -p) 2>/dev/null; exit 0' INT TERM

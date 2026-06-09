@@ -112,16 +112,19 @@ def load_tape(cond_id: str) -> dict | None:
 def replay(markets: list[dict], btc_1s: pd.DataFrame, threshold_pct: float,
           cooldown_s: int, max_lookahead_s: int, min_secs_to_close: int,
           min_latency_s: int, sweet_lo: float, sweet_hi: float,
-          fee_bps: float = 0) -> list[TickTrade]:
+          fee_bps: float = 0, require_window_anchor: bool = False) -> list[TickTrade]:
     closes = btc_1s["close"].astype(float).values
     timestamps = btc_1s["ts"].astype(int).values
     end_times = [m["end_ts"] for m in markets]
+    # Map ts -> idx for O(log n) window-open price lookups.
+    ts_to_idx = {int(ts): i for i, ts in enumerate(timestamps)}
 
     tracker = MoveTrackerSim(window_s=60)
     last_signal_ts = 0
     trades: list[TickTrade] = []
     stats = {"signals_fired": 0, "skip_no_market": 0, "skip_outside_sweet": 0,
-             "skip_no_tape": 0, "skip_no_fill": 0, "skip_cooldown": 0}
+             "skip_no_tape": 0, "skip_no_fill": 0, "skip_cooldown": 0,
+             "skip_anchor_disagree": 0, "skip_no_window_price": 0}
 
     for i in range(len(closes)):
         now_ts = int(timestamps[i])
@@ -139,6 +142,33 @@ def replay(markets: list[dict], btc_1s: pd.DataFrame, threshold_pct: float,
             last_signal_ts = now_ts
             stats["skip_no_market"] += 1
             continue
+
+        # Window-open anchor: require BTC-now vs BTC-at-window-open to agree
+        # in sign with the 60s rolling return. 5-min markets ⇒ window_start = end - 300.
+        if require_window_anchor:
+            window_start_ts = mk["end_ts"] - 300
+            idx = ts_to_idx.get(window_start_ts)
+            if idx is None:
+                # Tolerate up to 5s drift in case a candle is missing.
+                for off in (1, -1, 2, -2, 3, -3, 4, -4, 5, -5):
+                    idx = ts_to_idx.get(window_start_ts + off)
+                    if idx is not None:
+                        break
+            if idx is None:
+                last_signal_ts = now_ts
+                stats["skip_no_window_price"] += 1
+                continue
+            open_price = float(closes[idx])
+            if open_price <= 0:
+                last_signal_ts = now_ts
+                stats["skip_no_window_price"] += 1
+                continue
+            window_ret = (price / open_price - 1) * 100
+            if (window_ret > 0) != (ret > 0):
+                last_signal_ts = now_ts
+                stats["skip_anchor_disagree"] += 1
+                continue
+
         side = "UP" if ret > 0 else "DOWN"
         target_token = mk["up_token_id"] if side == "Up" else mk["down_token_id"]
 
@@ -199,6 +229,8 @@ def replay(markets: list[dict], btc_1s: pd.DataFrame, threshold_pct: float,
     print(f"[replay] {stats['signals_fired']} signals fired")
     print(f"  cooldown skips:         {stats['skip_cooldown']}")
     print(f"  no upcoming market:     {stats['skip_no_market']}")
+    print(f"  window-anchor disagree: {stats['skip_anchor_disagree']}")
+    print(f"  no window-open price:   {stats['skip_no_window_price']}")
     print(f"  outside sweet spot:     {stats['skip_outside_sweet']}")
     print(f"  no fillable BUY in tape:{stats['skip_no_tape']}")
     return trades
@@ -210,12 +242,15 @@ def main() -> int:
     ap.add_argument("--btc-file", required=True)
     ap.add_argument("--threshold", type=float, default=0.10)
     ap.add_argument("--cooldown", type=int, default=60)
-    ap.add_argument("--max-lookahead", type=int, default=300)
+    ap.add_argument("--max-lookahead", type=int, default=300,
+                    help="snipe window: only fire when seconds-to-close <= this")
     ap.add_argument("--min-seconds-to-close", type=int, default=30)
     ap.add_argument("--min-latency", type=int, default=5)
     ap.add_argument("--sweet-lo", type=float, default=0.30)
     ap.add_argument("--sweet-hi", type=float, default=0.70)
     ap.add_argument("--fee-bps", type=float, default=200)
+    ap.add_argument("--require-window-anchor", action="store_true",
+                    help="require BTC-now vs window-open to agree in sign with 60s return")
     ap.add_argument("--out", default="cache/tick_replay.jsonl")
     args = ap.parse_args()
 
@@ -229,7 +264,8 @@ def main() -> int:
 
     trades = replay(markets, btc, args.threshold, args.cooldown, args.max_lookahead,
                     args.min_seconds_to_close, args.min_latency,
-                    args.sweet_lo, args.sweet_hi, args.fee_bps)
+                    args.sweet_lo, args.sweet_hi, args.fee_bps,
+                    require_window_anchor=args.require_window_anchor)
 
     out = ROOT / args.out
     out.parent.mkdir(exist_ok=True, parents=True)

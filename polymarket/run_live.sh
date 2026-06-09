@@ -13,6 +13,8 @@ COOLDOWN="${COOLDOWN:-60}"
 SWEET_LO="${SWEET_LO:-0.30}"
 SWEET_HI="${SWEET_HI:-0.40}"  # tightened 2026-06-08: best-bucket [0.30,0.40] = 67% backtest + 1/1 live win; [0.40,0.45] = 0/3 live
 REQUIRE_CONFIRM="${REQUIRE_CONFIRM:-1}"  # 1 = require Coinbase 60s return to agree with Binance (filters single-exchange noise; Polymarket settles vs Chainlink-aggregated price)
+SNIPE_WINDOW_S="${SNIPE_WINDOW_S:-90}"   # only fire when ≤Ns to close (T-N snipe; compresses reversal risk between signal and resolution)
+REQUIRE_WINDOW_ANCHOR="${REQUIRE_WINDOW_ANCHOR:-1}"  # 1 = require BTC-now vs window-open return to agree in sign with 60s return
 
 trap 'kill $(jobs -p) 2>/dev/null; exit 0' INT TERM
 
@@ -24,12 +26,16 @@ while true; do
   echo "[wrapper $(date -u +%H:%M:%S)] starting trader"
   CONFIRM_FLAG=""
   if [ "$REQUIRE_CONFIRM" = "1" ]; then CONFIRM_FLAG="--require-confirm"; fi
+  ANCHOR_FLAG=""
+  if [ "$REQUIRE_WINDOW_ANCHOR" = "1" ]; then ANCHOR_FLAG="--require-window-anchor"; fi
   "$PYTHON" live_trader.py \
     --threshold "$THRESHOLD" \
     --cooldown "$COOLDOWN" \
     --sweet-lo "$SWEET_LO" \
     --sweet-hi "$SWEET_HI" \
+    --snipe-window-s "$SNIPE_WINDOW_S" \
     $CONFIRM_FLAG \
+    $ANCHOR_FLAG \
     --log "$LOG_DIR/live_${DATE}.jsonl" \
     2>&1 | tee -a "$STDOUT_LOG"
   EXIT_CODE=${PIPESTATUS[0]}

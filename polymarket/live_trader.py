@@ -168,12 +168,13 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         # Window-open anchor: the *actual* resolution question is "is BTC above
         # window-open at window-close?". Our 60s return is only a proxy. Require
         # sign agreement so we don't fire when the proxy and the real question disagree.
+        #
+        # gamma.window_start_iso is the EVENT listing date, not the trading window
+        # start — useless for this. gamma already filters to exactly 5-min windows,
+        # so window_open = end_dt - 300s is always correct.
         if require_window_anchor:
-            try:
-                w_open = datetime.fromisoformat(market.window_start_iso.replace("Z", "+00:00"))
-            except ValueError:
-                w_open = None
-            open_price = history.price_at(w_open) if w_open else None
+            w_open = market.end_dt - timedelta(seconds=300)
+            open_price = history.price_at(w_open)
             if open_price is None or open_price <= 0:
                 print(f"[skip] no window-open price (buffer < window start)", flush=True)
                 last_signal_ts = trade.ts

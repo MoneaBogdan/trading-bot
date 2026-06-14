@@ -28,4 +28,4 @@ services:
   ws-recorder:
     <<: *image
     container_name: polymarket-ws-recorder
-    command: ["python", "orderbook_recorder_ws.py"]
+    command: ["bash", "run_ws_recorder.sh"]

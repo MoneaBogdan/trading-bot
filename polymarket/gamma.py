@@ -11,18 +11,44 @@ import httpx
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
-# Each Bitcoin Up/Down market title looks like:
-#   "Bitcoin Up or Down - June 7, 4:25AM-4:30AM ET"
-TITLE_REGEX = re.compile(
-    r"Bitcoin Up or Down\s*-\s*([A-Za-z]+ \d+),\s*"
-    r"(\d{1,2}:\d{2}(?:AM|PM))-(\d{1,2}:\d{2}(?:AM|PM))\s*ET",
-    re.IGNORECASE,
-)
+# Polymarket Up/Down market title formats observed 2026-06:
+#   5-min / 15-min : "Bitcoin Up or Down - June 7, 4:25AM-4:30AM ET"
+#   Hourly         : "Bitcoin Up or Down - June 16, 5AM ET"
+ASSET_NAMES = {
+    "BTC": "Bitcoin",
+    "ETH": "Ethereum",
+    "SOL": "Solana",
+}
+
+
+def _range_regex(asset: str) -> re.Pattern:
+    """Matches '<Asset> Up or Down - DATE, START-END ET' (5-min, 15-min, etc.)."""
+    asset_name = ASSET_NAMES[asset.upper()]
+    return re.compile(
+        rf"{asset_name} Up or Down\s*-\s*([A-Za-z]+ \d+),\s*"
+        r"(\d{1,2}:\d{2}(?:AM|PM))-(\d{1,2}:\d{2}(?:AM|PM))\s*ET",
+        re.IGNORECASE,
+    )
+
+
+def _hourly_regex(asset: str) -> re.Pattern:
+    """Matches '<Asset> Up or Down - DATE, NAM ET' (hourly markets)."""
+    asset_name = ASSET_NAMES[asset.upper()]
+    return re.compile(
+        rf"{asset_name} Up or Down\s*-\s*([A-Za-z]+ \d+),\s*"
+        r"(\d{1,2}(?:AM|PM))\s*ET\s*$",
+        re.IGNORECASE,
+    )
+
+
+TITLE_REGEX = _range_regex("BTC")  # backward-compat for any external import
 
 
 @dataclass
 class BtcMarket:
-    """A single 5-min Bitcoin Up/Down market."""
+    """A single Up/Down market (any asset, any timeframe).
+    Kept named BtcMarket for backward compat with existing imports.
+    """
     event_id: str
     market_id: str
     condition_id: str
@@ -64,19 +90,21 @@ def _parse_token_ids(s: str | None) -> tuple[str | None, str | None]:
     return None, None
 
 
-def discover_btc_markets(window_horizon_min: int = 60, client: httpx.Client | None = None) -> list[BtcMarket]:
-    """Return upcoming Bitcoin Up/Down markets whose window ends within the next
-    `window_horizon_min` minutes. Useful for picking which market to trade.
+def discover_markets(
+    asset: str = "BTC",
+    timeframe_min: int = 5,
+    window_horizon_min: int = 60,
+    client: httpx.Client | None = None,
+) -> list[BtcMarket]:
+    """Return upcoming Up/Down markets for the given asset + timeframe whose
+    window ends within the next `window_horizon_min` minutes.
 
-    Skips longer-window markets (e.g. 15-min "4:15AM-4:30AM ET" spans) — those
-    have a different liquidity profile and aren't the latency-arb target.
+    asset ∈ {"BTC", "ETH", "SOL"}.
+    timeframe_min: window duration in minutes (5 for 5-min markets, 60 for hourly).
     """
     own = client is None
     client = client or httpx.Client(timeout=20.0)
     try:
-        # Pull events ending now-or-later, soonest first.
-        # NB: without end_date_min, the API returns events sorted by absolute
-        # endDate including ancient unresolved ones — we'd get garbage.
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         r = client.get(
             f"{GAMMA_BASE}/events",
@@ -94,18 +122,24 @@ def discover_btc_markets(window_horizon_min: int = 60, client: httpx.Client | No
         if own:
             client.close()
 
+    if timeframe_min == 60:
+        title_re = _hourly_regex(asset)
+        is_hourly = True
+    else:
+        title_re = _range_regex(asset)
+        is_hourly = False
     now = datetime.now(timezone.utc)
     horizon = now.timestamp() + window_horizon_min * 60
     out: list[BtcMarket] = []
     for e in events:
         title = e.get("title", "")
-        m = TITLE_REGEX.search(title)
+        m = title_re.search(title)
         if not m:
             continue
-        # Only keep 5-minute windows.
-        date_part, t1, t2 = m.groups()
-        if _minutes_between(t1, t2) != 5:
-            continue
+        if not is_hourly:
+            _date_part, t1, t2 = m.groups()
+            if _minutes_between(t1, t2) != timeframe_min:
+                continue
         end_iso = e.get("endDate") or ""
         try:
             end_dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
@@ -139,6 +173,14 @@ def discover_btc_markets(window_horizon_min: int = 60, client: httpx.Client | No
         ))
     out.sort(key=lambda x: x.end_dt)
     return out
+
+
+def discover_btc_markets(window_horizon_min: int = 60, client: httpx.Client | None = None) -> list[BtcMarket]:
+    """Backward-compat alias: BTC 5-min markets only.
+    New callers should use discover_markets(asset, timeframe_min, ...).
+    """
+    return discover_markets("BTC", timeframe_min=5,
+                            window_horizon_min=window_horizon_min, client=client)
 
 
 def _minutes_between(t1: str, t2: str) -> int:

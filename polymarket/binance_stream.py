@@ -1,4 +1,4 @@
-"""Binance public WebSocket: stream BTC trades for low-latency price reference.
+"""Binance public WebSocket: stream trades for low-latency price reference.
 
 Public stream, no auth. Each trade includes price + size + ts. We expose a
 small async iterator that yields trades; the monitor uses these to maintain
@@ -13,7 +13,14 @@ from datetime import datetime, timezone
 
 import websockets
 
-BINANCE_WS_URL = "wss://stream.binance.com:9443/ws/btcusdt@trade"
+BINANCE_WS_BASE = "wss://stream.binance.com:9443/ws"
+
+# Map our asset codes to Binance trading symbols (USDT-quoted spot).
+ASSET_TO_BINANCE_SYMBOL = {
+    "BTC": "btcusdt",
+    "ETH": "ethusdt",
+    "SOL": "solusdt",
+}
 
 
 @dataclass
@@ -24,11 +31,15 @@ class BinanceTrade:
     is_buyer_maker: bool   # True = market sell; False = market buy
 
 
-async def stream_btc_trades():
-    """Async generator yielding BinanceTrade objects. Auto-reconnects on disconnect."""
+async def stream_trades(asset: str = "BTC"):
+    """Async generator yielding BinanceTrade for the given asset.
+    asset ∈ {"BTC", "ETH", "SOL"}. Auto-reconnects.
+    """
+    symbol = ASSET_TO_BINANCE_SYMBOL[asset.upper()]
+    url = f"{BINANCE_WS_BASE}/{symbol}@trade"
     while True:
         try:
-            async with websockets.connect(BINANCE_WS_URL, ping_interval=20) as ws:
+            async with websockets.connect(url, ping_interval=20) as ws:
                 async for raw in ws:
                     msg = json.loads(raw)
                     if msg.get("e") != "trade":
@@ -39,8 +50,13 @@ async def stream_btc_trades():
                         size=float(msg["q"]),
                         is_buyer_maker=bool(msg["m"]),
                     )
-        except Exception as exc:
-            # Brief backoff before reconnect.
+        except Exception:
             import asyncio
             await asyncio.sleep(2.0)
             continue
+
+
+async def stream_btc_trades():
+    """Backward-compat alias for BTC. Use stream_trades(asset) for new code."""
+    async for tr in stream_trades("BTC"):
+        yield tr

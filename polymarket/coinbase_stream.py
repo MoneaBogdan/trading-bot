@@ -17,6 +17,13 @@ import websockets
 
 COINBASE_WS_URL = "wss://ws-feed.exchange.coinbase.com"
 
+# Map our asset codes to Coinbase product ids.
+ASSET_TO_COINBASE_PRODUCT = {
+    "BTC": "BTC-USD",
+    "ETH": "ETH-USD",
+    "SOL": "SOL-USD",
+}
+
 
 @dataclass
 class CoinbaseTrade:
@@ -26,11 +33,14 @@ class CoinbaseTrade:
     side: str  # "buy" or "sell" — the taker side
 
 
-async def stream_btc_trades():
-    """Async generator yielding CoinbaseTrade. Auto-reconnects."""
+async def stream_trades(asset: str = "BTC"):
+    """Async generator yielding CoinbaseTrade for the given asset.
+    asset ∈ {"BTC", "ETH", "SOL"}. Auto-reconnects.
+    """
+    product_id = ASSET_TO_COINBASE_PRODUCT[asset.upper()]
     sub = json.dumps({
         "type": "subscribe",
-        "product_ids": ["BTC-USD"],
+        "product_ids": [product_id],
         "channels": ["matches"],
     })
     while True:
@@ -50,3 +60,9 @@ async def stream_btc_trades():
         except Exception:
             await asyncio.sleep(2.0)
             continue
+
+
+async def stream_btc_trades():
+    """Backward-compat alias for BTC. Use stream_trades(asset) for new code."""
+    async for tr in stream_trades("BTC"):
+        yield tr

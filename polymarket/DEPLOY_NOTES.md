@@ -43,39 +43,83 @@ See `.env.example` for the full list.
 
 ## What runs together
 
-Two long-lived processes — both supervised by docker-compose (`restart: unless-stopped`):
+Seven long-lived processes — all supervised by docker-compose (`restart: unless-stopped`):
 
-1. `polymarket/run_live.sh` → `live_trader.py` (auto-restart wrapper, 10s backoff).
-2. `polymarket/run_ws_recorder.sh` → `orderbook_recorder_ws.py` (same wrapper pattern). Polymarket WS recorder, used to retroactively validate fills and feed backtests.
+**Six trader variants** (one per asset × timeframe — all share one image, differ only in env vars):
+
+| Service | Asset | Window | Threshold | Confirm | Notes |
+|---|---|---|---|---|---|
+| `trader-btc-5m` | BTC | 5 min | 0.10% | yes | The original — Chainlink-aggregate resolution |
+| `trader-eth-5m` | ETH | 5 min | 0.13% | yes | Higher 60s vol → wider threshold |
+| `trader-sol-5m` | SOL | 5 min | 0.20% | yes | Highest 60s vol |
+| `trader-btc-1h` | BTC | 60 min | 0.10% | **no** | Binance-only resolution — Coinbase confirm dropped |
+| `trader-eth-1h` | ETH | 60 min | 0.13% | **no** | Binance-only resolution |
+| `trader-sol-1h` | SOL | 60 min | 0.20% | **no** | Binance-only resolution |
+
+Each writes its own log files (see below). All run dry-run by default.
+
+**One shared WS recorder**: `polymarket-ws-recorder` runs `run_ws_recorder.sh` → `orderbook_recorder_ws.py`. Captures Polymarket L2 orderbook for retroactive fill validation and backtests. One recorder covers all variants — no need to duplicate.
 
 ## Logs — where everything lands
 
 All log paths are inside the container at `/app/polymarket/logs/`, mounted to the host at `<repo>/polymarket/logs/` via `docker-compose.yml`. After deploy, read them directly from the host — no `docker cp` needed.
 
+**Variant-tagged naming** so multiple traders don't collide:
+
+| Variant | Log files |
+|---|---|
+| BTC 5-min (legacy — keeps original name) | `live_YYYYMMDD.{log,jsonl}` |
+| Any other variant | `live_<asset>-<tf>m_YYYYMMDD.{log,jsonl}` |
+
+Examples:
+- `logs/live_20260615.log` / `.jsonl` — the original BTC-5m bot (preserves historical logs)
+- `logs/live_eth-5m_20260616.jsonl` — new ETH 5-min variant
+- `logs/live_btc-1h_20260616.jsonl` — new BTC hourly variant
+- `logs/orderbook_ws_20260616.{log,jsonl}` — shared WS recorder
+
 | File | Producer | Content |
 |---|---|---|
-| `logs/live_YYYYMMDD.log` | `run_live.sh` (tee) | Trader stdout/stderr: wrapper messages, startup banner, strategy prints, errors |
-| `logs/live_YYYYMMDD.jsonl` | `live_trader.py --log` | Structured record: every signal evaluated, every fire, every fill |
-| `logs/orderbook_ws_YYYYMMDD.log` | `run_ws_recorder.sh` (tee) | WS recorder stdout/stderr: reconnects, throughput heartbeats, errors |
-| `logs/orderbook_ws_YYYYMMDD.jsonl` | `orderbook_recorder_ws.py` | Polymarket L2 orderbook snapshots (one event per line) |
+| `live_*.log` | `run_live.sh` (tee) | Trader stdout: wrapper messages, startup banner, decisions, errors |
+| `live_*.jsonl` | `live_trader.py --log` | Structured record: every fire + fill. Includes `asset` and `timeframe_min` fields. |
+| `orderbook_ws_*.log` | `run_ws_recorder.sh` (tee) | WS stdout: reconnects, throughput heartbeats |
+| `orderbook_ws_*.jsonl` | `orderbook_recorder_ws.py` | Polymarket L2 orderbook snapshots (one event per line) |
 
-All four rotate by UTC date — the wrappers re-evaluate `DATE` on each restart loop. Docker's own journal also captures stdout (`docker logs polymarket-trader`, `docker logs polymarket-ws-recorder`) as a redundant copy.
+The `.jsonl` files rotate by UTC date (Python computes the date per write). The `.log` files capture date at wrapper-restart time — known cosmetic limitation, content is correct. Docker's journal also captures stdout (`docker logs polymarket-trader-<variant>`) as a redundant copy.
+
+**Old logs are preserved.** Historical `live_<date>.{log,jsonl}` files for BTC-5m remain on the server's bind mount across rebuilds. New variants get new tagged filenames; nothing is overwritten or renamed.
 
 Quick checks after deploy:
 
 ```bash
-ls -lah polymarket/logs/                                    # files growing?
-tail -f polymarket/logs/live_$(date -u +%Y%m%d).log         # trader live
-tail -f polymarket/logs/orderbook_ws_$(date -u +%Y%m%d).log # ws-recorder live
-wc -l polymarket/logs/live_$(date -u +%Y%m%d).jsonl         # fires today
-docker compose ps                                           # both services Up
+ls -lah polymarket/logs/                                            # all variants growing?
+docker compose ps                                                    # all 7 services Up?
+for v in '' eth-5m_ sol-5m_ btc-1h_ eth-1h_ sol-1h_; do
+  f="polymarket/logs/live_${v}$(date -u +%Y%m%d).jsonl"
+  [ -f "$f" ] && echo "$f: $(wc -l < "$f") fires"
+done
+tail -f polymarket/logs/live_eth-5m_$(date -u +%Y%m%d).log          # watch any variant live
 ```
 
-## Deploy checklist
+## Deploy checklist (fresh server)
 
 1. Provision VPS, install Docker + docker-compose.
 2. `git clone https://github.com/MoneaBogdan/trading-bot && cd trading-bot`
-3. Copy `.env.example` → `.env`, fill `POLY_PRIVATE_KEY` + `POLY_FUNDER_ADDRESS`.
-4. `docker-compose up -d` — auto-pull cron handles updates after that.
-5. Tail `polymarket/logs/live_*.log` to confirm startup; `pgrep -fl live_trader.py` should show one PID.
-6. Flip `POLY_DRY_RUN=false` in `.env` only after a dry-run day looks clean.
+3. Copy `polymarket/.env.example` → `polymarket/.env`, fill `POLY_PRIVATE_KEY` + `POLY_FUNDER_ADDRESS`.
+4. `docker compose up -d` — auto-pull cron handles updates after that. **Builds 7 containers**: 6 traders + 1 WS recorder.
+5. `docker compose ps` to confirm all seven Up. Tail any variant's log.
+6. Flip `POLY_DRY_RUN=false` in `.env` only after each variant's dry-run looks clean — recommend doing this one variant at a time, not all six at once.
+
+## Redeploying over the existing deployment (preserves all logs)
+
+If you already have the legacy single-trader deployment running on `/mnt/data/trading-bot`:
+
+```bash
+cd /mnt/data/trading-bot
+git pull                       # pulls multi-variant code
+docker compose down            # stops the old single trader + recorder
+docker compose build           # rebuild the shared image
+docker compose up -d           # starts all 7 containers
+docker compose ps              # verify 7 services Up
+```
+
+Existing `polymarket/logs/live_<date>.{log,jsonl}` files are on the bind mount — they survive the rebuild untouched. The new BTC-5m container will continue appending to the same `live_<date>.{log,jsonl}` filenames (legacy name preserved). New variants will get their own tagged files.

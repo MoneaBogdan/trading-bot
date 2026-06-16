@@ -31,10 +31,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from binance_stream import stream_btc_trades  # noqa: E402
+from binance_stream import stream_trades  # noqa: E402
 from clob import get_orderbook  # noqa: E402
-from coinbase_stream import stream_btc_trades as stream_coinbase_trades  # noqa: E402
-from gamma import discover_btc_markets  # noqa: E402
+from coinbase_stream import stream_trades as stream_coinbase_trades  # noqa: E402
+from gamma import discover_markets  # noqa: E402
 from monitor import MoveTracker, _pick_market  # noqa: E402
 from trader import trader_from_env  # noqa: E402
 
@@ -70,12 +70,14 @@ class PriceHistory:
         return result
 
 
-async def _track_coinbase(tracker: MoveTracker, hb: dict) -> None:
-    """Background loop: feed Coinbase BTC-USD trades into a separate MoveTracker.
+async def _track_coinbase(tracker: MoveTracker, hb: dict, asset: str) -> None:
+    """Background loop: feed Coinbase trades for `asset` into a separate MoveTracker.
     Used as a cross-exchange confirmation gate — Polymarket 5m markets settle
-    against Chainlink Data Streams which aggregates multiple venues, so a
-    Binance-only signal can diverge from the aggregate during fast moves."""
-    async for trade in stream_coinbase_trades():
+    against Chainlink Data Streams which aggregates multiple venues (Coinbase
+    included), so a Binance-only signal can diverge from the aggregate during
+    fast moves. Hourly markets resolve from Binance only, so the filter is
+    over-conservative there — disable via --no-require-confirm in that case."""
+    async for trade in stream_coinbase_trades(asset):
         tracker.add(trade)
         hb["cb"] = datetime.now(timezone.utc)
 
@@ -94,12 +96,15 @@ async def _watchdog(hb: dict, stale_s: float, require_confirm: bool) -> None:
                 os._exit(2)
 
 
-async def _refresh_markets(state: dict, interval_s: float = 60.0) -> None:
+async def _refresh_markets(state: dict, asset: str, timeframe_min: int,
+                           interval_s: float = 60.0) -> None:
     """Background loop: refresh upcoming markets every interval_s."""
+    horizon_min = max(10, timeframe_min * 2)
     while True:
         try:
             mks = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: discover_btc_markets(window_horizon_min=10)
+                None, lambda: discover_markets(asset, timeframe_min,
+                                               window_horizon_min=horizon_min)
             )
             state["markets"] = mks
             state["markets_updated"] = datetime.now(timezone.utc)
@@ -115,30 +120,33 @@ def _log(path: Path, payload: dict) -> None:
 
 async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
               sweet_lo: float, sweet_hi: float, require_confirm: bool,
-              snipe_window_s: float, require_window_anchor: bool) -> None:
+              snipe_window_s: float, require_window_anchor: bool,
+              asset: str, timeframe_min: int) -> None:
     trader = trader_from_env()
     print(f"[trader] dry_run={trader.config.dry_run}  "
           f"max_order=${trader.config.max_order_usdc}  "
           f"max_daily=${trader.config.max_daily_usdc}", flush=True)
-    print(f"[strategy] threshold={threshold_pct}%  cooldown={cooldown_s}s  "
+    print(f"[strategy] asset={asset}  timeframe={timeframe_min}m  "
+          f"threshold={threshold_pct}%  cooldown={cooldown_s}s  "
           f"sweet_spot=[{sweet_lo},{sweet_hi}]  "
           f"require_confirm={require_confirm}  "
           f"snipe_window={snipe_window_s}s  "
           f"require_window_anchor={require_window_anchor}", flush=True)
 
     state: dict = {"markets": [], "markets_updated": None}
-    asyncio.create_task(_refresh_markets(state))
+    asyncio.create_task(_refresh_markets(state, asset, timeframe_min))
 
     tracker = MoveTracker(window_seconds=60.0)
     cb_tracker = MoveTracker(window_seconds=60.0)
-    history = PriceHistory(window_s=360.0)
+    # Buffer must cover the full window + headroom for the open-price lookup.
+    history = PriceHistory(window_s=float(timeframe_min * 60 + 60))
     hb: dict = {"binance": datetime.now(timezone.utc), "cb": datetime.now(timezone.utc)}
     if require_confirm:
-        asyncio.create_task(_track_coinbase(cb_tracker, hb))
+        asyncio.create_task(_track_coinbase(cb_tracker, hb, asset))
     asyncio.create_task(_watchdog(hb, stale_s=90.0, require_confirm=require_confirm))
     last_signal_ts: datetime | None = None
 
-    async for trade in stream_btc_trades():
+    async for trade in stream_trades(asset):
         tracker.add(trade)
         history.add(trade)
         hb["binance"] = datetime.now(timezone.utc)
@@ -165,15 +173,12 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
             last_signal_ts = trade.ts  # cooldown to avoid spinning on the same move
             continue
 
-        # Window-open anchor: the *actual* resolution question is "is BTC above
-        # window-open at window-close?". Our 60s return is only a proxy. Require
-        # sign agreement so we don't fire when the proxy and the real question disagree.
-        #
-        # gamma.window_start_iso is the EVENT listing date, not the trading window
-        # start — useless for this. gamma already filters to exactly 5-min windows,
-        # so window_open = end_dt - 300s is always correct.
+        # Window-open anchor: the *actual* resolution question is "is the price
+        # above window-open at window-close?". Our 60s return is only a proxy.
+        # Require sign agreement so we don't fire when proxy and real question disagree.
+        # window_open = end_dt - timeframe_min*60 (gamma already filters to exact duration).
         if require_window_anchor:
-            w_open = market.end_dt - timedelta(seconds=300)
+            w_open = market.end_dt - timedelta(seconds=timeframe_min * 60)
             open_price = history.price_at(w_open)
             if open_price is None or open_price <= 0:
                 print(f"[skip] no window-open price (buffer < window start)", flush=True)
@@ -207,8 +212,12 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         record = {
             "type": "trade",
             "ts": trade.ts.isoformat(),
-            "btc_price": trade.price,
-            "btc_ret_60s_pct": ret,
+            "asset": asset,
+            "timeframe_min": timeframe_min,
+            "price": trade.price,
+            "ret_60s_pct": ret,
+            "btc_price": trade.price,        # legacy alias for backward compat
+            "btc_ret_60s_pct": ret,          # legacy alias for backward compat
             "market_title": market.title,
             "market_condition_id": market.condition_id,
             "market_end": market.window_end_iso,
@@ -234,6 +243,10 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
 def main() -> int:
     load_dotenv()
     ap = argparse.ArgumentParser()
+    ap.add_argument("--asset", choices=["BTC", "ETH", "SOL"], default="BTC",
+                    help="which underlying asset to trade (Polymarket runs Up/Down for all three)")
+    ap.add_argument("--timeframe-min", type=int, default=5,
+                    help="market window duration in minutes (5 for 5-min, 60 for hourly)")
     ap.add_argument("--threshold", type=float, default=0.10)
     ap.add_argument("--cooldown", type=float, default=60.0)
     ap.add_argument("--sweet-lo", type=float, default=0.30)
@@ -243,15 +256,27 @@ def main() -> int:
     ap.add_argument("--snipe-window-s", type=float, default=90.0,
                     help="only fire when seconds-to-close <= this (smaller = less reversal risk, fewer fires)")
     ap.add_argument("--require-window-anchor", action="store_true",
-                    help="require BTC-now-vs-window-open return to agree with 60s return (sign check)")
-    ap.add_argument("--log", default=f"logs/live_{datetime.now(timezone.utc):%Y%m%d}.jsonl")
+                    help="require window-open-vs-now return to agree with 60s return (sign check)")
+    ap.add_argument("--log", default=None,
+                    help="JSONL trade record path; defaults to logs/live_<asset>-<tf>m_<date>.jsonl")
     args = ap.parse_args()
+
+    if args.log is None:
+        variant = f"{args.asset.lower()}-{args.timeframe_min}m"
+        # Preserve legacy filename for the existing BTC-5m bot to keep
+        # backward-compat with old logs and downstream tooling.
+        if variant == "btc-5m":
+            args.log = f"logs/live_{datetime.now(timezone.utc):%Y%m%d}.jsonl"
+        else:
+            args.log = f"logs/live_{variant}_{datetime.now(timezone.utc):%Y%m%d}.jsonl"
+
     log_path = Path(args.log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         asyncio.run(run(log_path, args.threshold, args.cooldown,
                         args.sweet_lo, args.sweet_hi, args.require_confirm,
-                        args.snipe_window_s, args.require_window_anchor))
+                        args.snipe_window_s, args.require_window_anchor,
+                        args.asset, args.timeframe_min))
     except KeyboardInterrupt:
         print("\n[stop] interrupted by user", flush=True)
     return 0

@@ -1,6 +1,15 @@
-# Two services share the same image (built once).
-#   trader        — live BTC Up/Down latency-arb bot (Binance signal + Coinbase confirm, lifts ask on Polymarket)
-#   ws-recorder   — Polymarket L2 orderbook recorder, used to retroactively validate fills
+# Multi-variant Polymarket Up/Down latency-arb bot.
+#
+# Six trader services (one per asset × timeframe variant) all share one image.
+# A single ws-recorder captures the L2 orderbook for retroactive fill validation
+# and backtesting — no need to duplicate it per variant.
+#
+# Each trader writes to its own variant-tagged log file under
+# polymarket/logs/. The legacy BTC-5m variant keeps the original
+# live_<date>.{log,jsonl} naming so all historical logs remain useful.
+#
+# All variants run dry-run by default (POLY_DRY_RUN=true in .env). Flip
+# variants live one at a time after watching dry-run output for a few days.
 
 x-image: &image
   build:
@@ -11,19 +20,75 @@ x-image: &image
   env_file:
     - ./polymarket/.env
   volumes:
-    # Logs and JSONL trade records persist on the host. Delete from host to rotate.
     - ./polymarket/logs:/app/polymarket/logs
-    # API creds derived from setup_wallet.py (will be created on first run if missing).
     - ./polymarket/polymarket_creds.json:/app/polymarket/polymarket_creds.json
-  # If the host doesn't sync time well (LXC, some Proxmox configs), uncomment:
-  # environment:
-  #   - TZ=UTC
 
 services:
-  trader:
+  # --- 5-minute markets (Chainlink-aggregate resolution → keep Coinbase confirm) ---
+
+  trader-btc-5m:
     <<: *image
-    container_name: polymarket-trader
+    container_name: polymarket-trader-btc-5m
     command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: BTC
+      TIMEFRAME_MIN: "5"
+      THRESHOLD: "0.10"
+      REQUIRE_CONFIRM: "1"
+
+  trader-eth-5m:
+    <<: *image
+    container_name: polymarket-trader-eth-5m
+    command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: ETH
+      TIMEFRAME_MIN: "5"
+      THRESHOLD: "0.13"
+      REQUIRE_CONFIRM: "1"
+
+  trader-sol-5m:
+    <<: *image
+    container_name: polymarket-trader-sol-5m
+    command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: SOL
+      TIMEFRAME_MIN: "5"
+      THRESHOLD: "0.20"
+      REQUIRE_CONFIRM: "1"
+
+  # --- Hourly markets (Binance-only resolution → Coinbase confirm disabled) ---
+
+  trader-btc-1h:
+    <<: *image
+    container_name: polymarket-trader-btc-1h
+    command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: BTC
+      TIMEFRAME_MIN: "60"
+      THRESHOLD: "0.10"
+      REQUIRE_CONFIRM: "0"
+
+  trader-eth-1h:
+    <<: *image
+    container_name: polymarket-trader-eth-1h
+    command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: ETH
+      TIMEFRAME_MIN: "60"
+      THRESHOLD: "0.13"
+      REQUIRE_CONFIRM: "0"
+
+  trader-sol-1h:
+    <<: *image
+    container_name: polymarket-trader-sol-1h
+    command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: SOL
+      TIMEFRAME_MIN: "60"
+      THRESHOLD: "0.20"
+      REQUIRE_CONFIRM: "0"
+
+  # --- WS recorder: shared, captures orderbook for retroactive validation ---
 
   ws-recorder:
     <<: *image

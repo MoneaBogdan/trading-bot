@@ -187,3 +187,26 @@ Open items to validate after server redeploy:
 - Are the ETH/SOL fire rates higher than BTC (predicted: 2–3× more candidates due to vol)?
 - Does the hourly Coinbase-confirm-disabled variant fire more often than the 5-min one?
 - Per-asset threshold re-fit — schedule a backtest pass once each variant has 30 days of data.
+
+### 2026-06-16 — New angles round 2: information-edge sources
+
+Round-2 web search avoided everything already covered. Top findings:
+
+**Tree of Alpha news websocket** ([treeofalpha.com](https://www.treeofalpha.com/)) — the only news-latency feed with persistent 2026 edge. Aggregates 1000+ sources + 2000+ Twitter accounts; beats raw Twitter by 200ms–2s on listings, hacks, macro headlines. Used by every serious market-maker desk and Hyperliquid sniping bots. Free Telegram tier exists but throttled; websocket API ~$50–200/mo (undisclosed, DM them). The edge isn't the feed itself — it's pre-positioning Polymarket limit orders keyed to known headline triggers (Fed speakers, ETF flow reports, BLS releases) before the panic-orders that follow. Build #4 candidate: ~1 week MVP.
+
+**Polymarket whale tracking — skip the vendors.** Polywhaler, PolySharks, polymarket-whales.xyz all repackage on-chain data with 5-minute polling delays. Polymarket positions are public Polygon ERC-1155 balances; a 100-line Python indexer beats every paid tier on latency. Real edge exists only in: (a) copying known-sharp wallets within seconds on illiquid markets, (b) fading retail copy-traders after Telegram pings. Vendor-reported PnL ("+8.4% weighted, 63.2% win rate" — PolySharks) is gross-of-fees marketing — ignore. Build #5 candidate: ~2 days; subscribe to the CTF Exchange's `OrderFilled` event filtered by a hand-curated wallet list (top 50 by realized PnL).
+
+**DefiLlama derivatives endpoints** ([defillama.com](https://defillama.com)) — most underused free dataset in crypto. Perp OI, funding, volume by venue, no rate limits worth mentioning, Python wrapper available. Cross-reference with Polymarket BTC: when aggregated funding diverges >2σ from Polymarket's implied direction → fade signal. Build #6 candidate: ~2 days, worst case it's useful telemetry.
+
+**Sentiment feeds are mostly dead in 2026.** January 2026: X revoked API access for "apps that pay users to post"; Kaito sunsetted Yaps, lost 157k yappers, KAITO -17% on news ([coindesk.com](https://www.coindesk.com/business/2026/01/15/kaito-to-sunset-yaps-as-x-cracks-down-on-infofi-apps-token-falls-17)). The underlying X data quality degraded across the entire sector (LunarCrush, Santiment, Glassnode social). For our use case: **skip entirely.**
+
+**Polymarket alternatives with obscurity edge**: Azuro / SX Bet (decentralized sports — Polymarket's NBA/NFL markets often 2–4¢ wider here), Insight Prediction (long-tail political, $500 order can be top-of-book), OG.com / DraftKings Predictions (CFTC-regulated but tight spreads — no edge). PredictIt is dead; Kalshi ate that demand.
+
+**Underused on-chain tools**: Arkham Pro $24.99/mo + Telegram alerts ([bitget.com](https://www.bitget.com/news/detail/12560605205721), single-source pricing flag) — cheap if you have specific wallets to tag. Nansen Smart Money labels are now table stakes (gone as standalone edge; need second-derivative). Parsec overpriced for retail unless trading options.
+
+**Alpha-leak accounts to follow** (post real PnL/backtests, not shilling): Quant Journey ([quantjourney.substack.com](https://quantjourney.substack.com/)), angusslq ([angusslq.substack.com](https://angusslq.substack.com/p/heading-to-2026-with-5-quant-trading)), Quant Arb ([substack.com/@quantarb](https://substack.com/@quantarb)), SetupAlpha ([setup4alpha.substack.com](https://setup4alpha.substack.com/p/my-scientific-workflow-for-generating-alpha)).
+
+**Ranked next-sprint priorities** from this round:
+1. Tree of Alpha + headline-bucketed Polymarket pre-positioning (~1 week MVP, real edge)
+2. Self-indexed whale wallet feed via Polygon node (~2 days)
+3. DefiLlama derivatives funding-divergence signal (~2 days)

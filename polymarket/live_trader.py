@@ -31,12 +31,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from binance_stream import stream_trades  # noqa: E402
 from clob import get_orderbook  # noqa: E402
 from coinbase_stream import stream_trades as stream_coinbase_trades  # noqa: E402
 from gamma import discover_markets  # noqa: E402
 from monitor import MoveTracker, _pick_market  # noqa: E402
 from trader import trader_from_env  # noqa: E402
+from src.core.logger import BotLogger  # noqa: E402
+from uuid import uuid4  # noqa: E402
 
 
 class PriceHistory:
@@ -121,7 +124,8 @@ def _log(path: Path, payload: dict) -> None:
 async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
               sweet_lo: float, sweet_hi: float, require_confirm: bool,
               snipe_window_s: float, require_window_anchor: bool,
-              asset: str, timeframe_min: int) -> None:
+              asset: str, timeframe_min: int,
+              bot_logger: BotLogger) -> None:
     trader = trader_from_env()
     print(f"[trader] dry_run={trader.config.dry_run}  "
           f"max_order=${trader.config.max_order_usdc}  "
@@ -132,6 +136,15 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
           f"require_confirm={require_confirm}  "
           f"snipe_window={snipe_window_s}s  "
           f"require_window_anchor={require_window_anchor}", flush=True)
+    bot_logger.boot(
+        asset=asset, timeframe_min=timeframe_min, threshold_pct=threshold_pct,
+        cooldown_s=cooldown_s, sweet_lo=sweet_lo, sweet_hi=sweet_hi,
+        require_confirm=require_confirm, snipe_window_s=snipe_window_s,
+        require_window_anchor=require_window_anchor,
+        dry_run=trader.config.dry_run,
+        max_order_usdc=trader.config.max_order_usdc,
+        max_daily_usdc=trader.config.max_daily_usdc,
+    )
 
     state: dict = {"markets": [], "markets_updated": None}
     asyncio.create_task(_refresh_markets(state, asset, timeframe_min))
@@ -163,6 +176,8 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
             if cb_ret is None or abs(cb_ret) < threshold_pct or (cb_ret > 0) != (ret > 0):
                 cb_disp = "n/a" if cb_ret is None else f"{cb_ret:+.3f}%"
                 print(f"[skip] cb confirm fail  binance={ret:+.3f}% coinbase={cb_disp}", flush=True)
+                bot_logger.skip("cb_confirm_fail", ts=trade.ts,
+                                ret_60s_pct=ret, cb_ret_60s_pct=cb_ret)
                 last_signal_ts = trade.ts
                 continue
 
@@ -170,6 +185,8 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         # the smaller the reversal risk between signal and resolution.
         market = _pick_market(state["markets"], trade.ts, max_lookahead_s=int(snipe_window_s))
         if market is None:
+            bot_logger.skip("no_market_in_window", ts=trade.ts,
+                            ret_60s_pct=ret, snipe_window_s=snipe_window_s)
             last_signal_ts = trade.ts  # cooldown to avoid spinning on the same move
             continue
 
@@ -182,11 +199,15 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
             open_price = history.price_at(w_open)
             if open_price is None or open_price <= 0:
                 print(f"[skip] no window-open price (buffer < window start)", flush=True)
+                bot_logger.skip("no_window_open_price", ts=trade.ts,
+                                ret_60s_pct=ret, window_open_iso=w_open.isoformat())
                 last_signal_ts = trade.ts
                 continue
             window_ret = (trade.price / open_price - 1) * 100
             if (window_ret > 0) != (ret > 0):
                 print(f"[skip] window-anchor disagree  60s={ret:+.3f}% window={window_ret:+.3f}%", flush=True)
+                bot_logger.skip("window_anchor_disagree", ts=trade.ts,
+                                ret_60s_pct=ret, window_ret_pct=window_ret)
                 last_signal_ts = trade.ts
                 continue
 
@@ -198,16 +219,24 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         ask = ob.best_ask
         if ask is None:
             print(f"[skip] no ask on {direction} side for {market.title[:50]}", flush=True)
+            bot_logger.skip("no_ask_on_side", ts=trade.ts,
+                            ret_60s_pct=ret, direction=direction,
+                            market_id=market.condition_id)
             last_signal_ts = trade.ts
             continue
         if not (sweet_lo <= ask <= sweet_hi):
             print(f"[skip] ask {ask} outside sweet spot [{sweet_lo},{sweet_hi}]  "
                   f"market={market.title[:50]}", flush=True)
+            bot_logger.skip("ask_outside_sweet_band", ts=trade.ts,
+                            ret_60s_pct=ret, ask=ask,
+                            sweet_lo=sweet_lo, sweet_hi=sweet_hi,
+                            market_id=market.condition_id)
             last_signal_ts = trade.ts
             continue
 
         # Place order
         size_usdc = trader.config.max_order_usdc
+        intent_id = str(uuid4())
         result = trader.place_buy_fok(target_token, ask, size_usdc)
         record = {
             "type": "trade",
@@ -233,6 +262,19 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
             "dry_run": trader.config.dry_run,
         }
         _log(log_path, record)
+        cost = (result.filled_size * result.filled_price) if (
+            result.filled_size and result.filled_price) else None
+        bot_logger.fire(
+            ts=trade.ts, intent_id=intent_id, venue="polymarket",
+            market_id=market.condition_id, market_title=market.title,
+            outcome_name=direction, side="buy", order_type="fok_limit",
+            size_usdc=size_usdc, limit_price=ask,
+            filled_size=result.filled_size, filled_price=result.filled_price,
+            cost_usdc=cost, order_ok=result.ok, order_id=result.order_id,
+            dry_run=trader.config.dry_run,
+            ret_60s_pct=ret, underlying_price=trade.price,
+            error=result.error,
+        )
         status = "DRY" if trader.config.dry_run else ("OK" if result.ok else "FAIL")
         print(f"[ORDER {status}] {trade.ts.strftime('%H:%M:%S')}  ret={ret:+.3f}%  "
               f"dir={direction}  ask={ask}  market='{market.title[:50]}'  "
@@ -272,13 +314,24 @@ def main() -> int:
 
     log_path = Path(args.log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    bot_name = f"{args.asset.lower()}-{args.timeframe_min}m"
+    bot_logger = BotLogger(
+        bot=bot_name,
+        strategy="PolymarketLatencyArb",
+        base_dir=log_path.parent,
+    )
     try:
         asyncio.run(run(log_path, args.threshold, args.cooldown,
                         args.sweet_lo, args.sweet_hi, args.require_confirm,
                         args.snipe_window_s, args.require_window_anchor,
-                        args.asset, args.timeframe_min))
+                        args.asset, args.timeframe_min, bot_logger))
     except KeyboardInterrupt:
+        bot_logger.shutdown(reason="keyboard_interrupt")
         print("\n[stop] interrupted by user", flush=True)
+    except BaseException as exc:
+        bot_logger.crashed(exc)
+        raise
     return 0
 
 

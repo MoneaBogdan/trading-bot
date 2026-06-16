@@ -1344,10 +1344,18 @@ The live bot must keep running. Each phase is a non-breaking commit; nothing is 
 ### Phase A — Document & freeze interfaces ✅ (this commit + the prior architecture commit)
 - `ARCHITECTURE.md`. No code change.
 
-### Phase B — `src/core/` skeleton + parallel new logger
-- Create `src/core/{types,logger,config,registry,clock}.py`.
-- Add `core/logger.py` writing the new schema; wire it into `eth-5m` only as a *parallel* logger — writes both legacy `live_eth-5m_*.jsonl` AND new `logs/bot=eth-5m/*.jsonl`.
-- After 1 week, validate parity (row counts match, fire events match by ts ± 1s). Then drop legacy.
+### Phase B — `src/core/` skeleton + parallel new logger 🟡 (in flight, commit `70249f6`)
+- ✅ Create `src/core/` package (logger landed; types/config/registry/clock to follow as needed).
+- ✅ `src/core/logger.py` with controlled-vocab `BotLogger` writing `logs/bot=<name>/YYYY-MM-DD.jsonl`.
+- ✅ Wired into `polymarket/live_trader.py` for ALL 6 variants (not just `eth-5m` — single shared entry point made per-variant rollout unnecessary). Legacy `logs/live_*.jsonl` paths untouched.
+- ⏳ After ≥24h of real traffic post-redeploy, validate parity: same fire count in legacy vs new for each variant, timestamps aligned ±1s. Skip-event mismatch is expected (legacy didn't log skips).
+- ⏳ Drop legacy writes only after parity holds for one week.
+
+### Phase B.5 — Strategy style guide ✅ (commit `70249f6`)
+- `STRATEGY_TEMPLATE.md` + `src/strategies/_template.py` codify the five rules
+  (pure `decide`, env→Params at boot, no cross-imports, mutable State,
+  side-effects in runner) so new strategies are written close to the Phase C
+  target shape and future extraction is mechanical.
 
 ### Phase C — Strategy extraction
 - Extract latency-arb decision tree from `polymarket/live_trader.py` into `src/strategies/polymarket_latency_arb.py`, matching the contract in §7.

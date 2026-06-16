@@ -162,3 +162,28 @@ Critical finding via targeted WebSearch:
 - **Keep the Coinbase filter tight.** Chainlink includes Coinbase, so Coinbase divergence is a real resolution-risk signal, not noise. The 31% rejection rate is doing useful work.
 - **If we extend to hourly markets:** the filter could be dropped or relaxed to a directional-only sanity check (e.g., same sign + ≥0.03%) since Coinbase is not in the hourly resolution path.
 - **Resolution sources can change.** Polymarket has used different feeds historically; re-check the rules section on each specific market page before deploying any new variant.
+
+### 2026-06-16 — Polymarket market inventory (verified live)
+
+Confirmed against the Gamma API while building the multi-variant refactor:
+
+- **All three assets we care about (BTC, ETH, SOL) have active Up/Down markets** in both 5-min and hourly windows. 5-min markets appear ~10 ahead at any time; hourly markets appear 1 ahead.
+- **Other assets observed live**: BNB, Dogecoin (likely more — XRP per [polyesc.xyz](https://polyesc.xyz/blog/polymarket-crypto-bucket-markets)). Worth a future expansion if BTC/ETH/SOL variants prove out.
+- **15-min windows also exist** (e.g., `"4:15AM-4:30AM ET"`) — different liquidity profile per the original `discover_btc_markets` doc comment. Could be a third timeframe variant if needed.
+- **Hourly title format is single-time** (`"Bitcoin Up or Down - June 16, 5AM ET"`), not start-end like 5-min. Required a separate regex in `gamma.py`. The `end_dt` resolves at the *end* of the named hour (i.e., `5AM ET` market ends at 6AM ET / 11AM UTC).
+
+### 2026-06-16 — Phase 1 deployed (6 variants live in repo, server redeploy pending)
+
+Shipped multi-variant code as commit `955976b`:
+
+- 6 docker services (BTC/ETH/SOL × 5m/1h), 1 shared WS recorder
+- Per-asset thresholds picked from research vol estimates: BTC 0.10%, ETH 0.13%, SOL 0.20% — **will need to be re-fit from actual 30-day data** once we collect it
+- Coinbase confirm filter **disabled by default for hourly variants** per the resolution-feed finding above
+- Legacy `live_<date>.{log,jsonl}` filenames preserved for BTC-5m so historical logs and downstream tooling keep working
+- Old function aliases (`discover_btc_markets`, `stream_btc_trades`) retained — no breakage in monitor/recorder/test scripts
+
+Open items to validate after server redeploy:
+- Do all 6 variants subscribe and start logging?
+- Are the ETH/SOL fire rates higher than BTC (predicted: 2–3× more candidates due to vol)?
+- Does the hourly Coinbase-confirm-disabled variant fire more often than the 5-min one?
+- Per-asset threshold re-fit — schedule a backtest pass once each variant has 30 days of data.

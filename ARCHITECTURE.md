@@ -1344,11 +1344,12 @@ The live bot must keep running. Each phase is a non-breaking commit; nothing is 
 ### Phase A — Document & freeze interfaces ✅ (this commit + the prior architecture commit)
 - `ARCHITECTURE.md`. No code change.
 
-### Phase B — `src/core/` skeleton + parallel new logger 🟡 (in flight, commit `70249f6`)
+### Phase B — `src/core/` skeleton + parallel new logger 🟡 (deployed, parity validation in flight — last status 2026-06-17)
 - ✅ Create `src/core/` package (logger landed; types/config/registry/clock to follow as needed).
 - ✅ `src/core/logger.py` with controlled-vocab `BotLogger` writing `logs/bot=<name>/YYYY-MM-DD.jsonl`.
 - ✅ Wired into `polymarket/live_trader.py` for ALL 6 variants (not just `eth-5m` — single shared entry point made per-variant rollout unnecessary). Legacy `logs/live_*.jsonl` paths untouched.
-- ⏳ After ≥24h of real traffic post-redeploy, validate parity: same fire count in legacy vs new for each variant, timestamps aligned ±1s. Skip-event mismatch is expected (legacy didn't log skips).
+- ✅ Controlled vocab extended with news_alpha skip reasons (`news_*`); see `src/core/logger.py`.
+- 🟡 Parity check in progress. As of 2026-06-17 (~22.5h post-deploy): 1 fire across all 6 variants (eth-5m UP at 0.36 → WIN, both legacy and new-schema rows captured). Need more fires across other variants before parity is statistically meaningful — see task #10 + `reports/STRATEGY_FINDINGS.md`.
 - ⏳ Drop legacy writes only after parity holds for one week.
 
 ### Phase B.5 — Strategy style guide ✅ (commit `70249f6`)
@@ -1356,6 +1357,21 @@ The live bot must keep running. Each phase is a non-breaking commit; nothing is 
   (pure `decide`, env→Params at boot, no cross-imports, mutable State,
   side-effects in runner) so new strategies are written close to the Phase C
   target shape and future extraction is mechanical.
+
+### Phase B.6 — Strategy template validated by greenfield build ✅ (commits `7fb42ed`, `bdfc02a`, `9fcc815`)
+- Built `news_alpha` (Tree of Alpha news → Polymarket Up/Down) following STRATEGY_TEMPLATE.md from scratch as a proof point:
+  - `src/strategies/news_alpha/strategy.py` — pure `decide(state, event, params)`, `Params`/`State`/`Intent` shape per template.
+  - `src/strategies/news_alpha/classifier.py` — keyword prefilter (PURE) + Claude Sonnet LLM call (isolated to the runner).
+  - `src/strategies/news_alpha/sources/{types,treeofalpha_rest,telegram}.py` — pluggable source layer behind `asyncio.Queue[Headline]`. `NEWS_SOURCE` env switches between sources without touching strategy code. **This source-layer-as-protocol is the pattern Phase D's stream bus will generalize.**
+  - `src/bots/news_alpha_runner.py` — the side-effects shell; reads config, wires source → classifier → discover → decide → executor + BotLogger. Tested end-to-end in docker (real Sonnet call classified "SEC approves spot ETF for BTC" → `etf_approval` direction=up conf=0.95).
+- The exercise confirmed the template is workable in practice and ironed out concrete issues (e.g., `polymarket/` not being an importable package → runners use bare `sys.path` prepend, matching `live_trader.py`'s existing pattern).
+- **Implication for Phase C:** the latency-arb extraction can now follow the same shape mechanically. No template revisions needed.
+
+### Phase B.7 — Operational tooling for ongoing tuning ✅ (commit `a7b074c`)
+- `polymarket/backtest/sweet_band_counterfactual.py` — replays `ask_outside_sweet_band` skip rows against Polymarket gamma resolutions to size widened-band PnL. Surfaced the [0.60, 0.75] edge bucket on 2026-06-17 (n=282 resolved signals, 77% direction accuracy overall, +$61 in that band).
+- `polymarket/backtest/daily_report.py` — generates `reports/<YYYY-MM-DD>.md` per UTC date with per-bot stats, configs (extracted from boot events), market context (Polymarket UP/DOWN resolution skew), news-recorder summary, and auto-derived **direction** + **risks** sections. `--push` flag commits + pushes.
+- `reports/STRATEGY_FINDINGS.md` — running curated log of evidence-based findings so we don't relearn the same lessons. Daily reports under `reports/<date>.md` are kept in git.
+- Sweet-band v2 applied: all 6 main variants → `[0.60, 0.75]`; `trader-eth-5m-wide` refocused to `[0.75, 0.90]` as a tail-bucket probe.
 
 ### Phase C — Strategy extraction
 - Extract latency-arb decision tree from `polymarket/live_trader.py` into `src/strategies/polymarket_latency_arb.py`, matching the contract in §7.

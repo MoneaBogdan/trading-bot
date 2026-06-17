@@ -1,12 +1,12 @@
 """News-driven Polymarket trader runner.
 
 Wires together:
-  * Telegram source (Telethon) → raw headlines
+  * News source (selected by NEWS_SOURCE env: 'treeofalpha_rest' [default] or 'telegram')
   * Layered classifier (keyword prefilter + Claude Sonnet) → Classification
   * Polymarket gamma market discovery → MarketCandidate[]
   * Pure decide() function → Intent (or skip)
   * Polymarket trader execution (Trader.place_buy_fok)
-  * BotLogger (new-schema JSONL) + legacy print log
+  * BotLogger (new-schema JSONL)
 
 Defaults to DRY-RUN. Caps via env (POLY_MAX_ORDER_USDC, POLY_MAX_DAILY_USDC).
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -30,12 +30,6 @@ from uuid import uuid4
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 sys.path.insert(0, str(_REPO_ROOT / "polymarket"))
-
-try:
-    from telethon import TelegramClient, events
-except ImportError:
-    sys.stderr.write("telethon not installed: pip install telethon\n")
-    raise
 
 try:
     import anthropic
@@ -50,6 +44,7 @@ from src.strategies.news_alpha.classifier import (
     LLMClassifier,
     keyword_prefilter,
 )
+from src.strategies.news_alpha.sources.types import Headline
 from src.strategies.news_alpha.strategy import (
     Classification,
     Intent,
@@ -97,9 +92,6 @@ def _trader_config_from_env() -> TraderConfig:
 
 # ---- Polymarket market discovery (across all assets we trade) ----
 
-# Map (asset, horizon_min from classifier) → which Polymarket timeframes to scan.
-# For news-driven trades, the closest-resolving market is best, so we scan both
-# the asset's 5-min and 60-min variants and let decide() pick the soonest.
 _ASSETS_TO_SCAN = ("BTC", "ETH", "SOL")
 _TIMEFRAMES_TO_SCAN = (5, 60)
 
@@ -137,18 +129,128 @@ def _gather_candidates(asset: str, http: httpx.Client) -> list[MarketCandidate]:
     return candidates
 
 
+def _cls_dict(c: Classification) -> dict[str, Any]:
+    return {
+        "asset": c.asset,
+        "direction": c.direction,
+        "confidence": c.confidence,
+        "horizon_min": c.horizon_min,
+        "reason": c.reason,
+    }
+
+
+# ---- Per-headline processing ----
+
+async def _process_headline(
+    h: Headline,
+    *,
+    llm: LLMClassifier,
+    params: Params,
+    state: State,
+    bot_logger: BotLogger,
+    trader: Trader,
+    http: httpx.Client,
+) -> None:
+    text = h.text
+    ts = h.ts
+
+    # Stage 1: keyword prefilter (free, instant). ~95% of headlines drop here.
+    hit = keyword_prefilter(text)
+    if hit is None:
+        return
+
+    # Stage 2: LLM classification
+    try:
+        cls = llm.classify(text, prefilter=hit)
+    except Exception as e:
+        bot_logger.skip("news_classifier_error", ts=ts, headline=text[:200],
+                        source=h.source, channel=h.channel,
+                        error_type=type(e).__name__, error=str(e))
+        return
+
+    if cls.asset not in _ASSETS_TO_SCAN:
+        bot_logger.skip("news_asset_out_of_scope", ts=ts, headline=text[:200],
+                        source=h.source, channel=h.channel,
+                        classification=_cls_dict(cls))
+        return
+
+    loop = asyncio.get_event_loop()
+    candidates = await loop.run_in_executor(None, _gather_candidates, cls.asset, http)
+
+    news_event = NewsEvent(
+        ts=ts, headline=text, classification=cls,
+        candidates=tuple(candidates),
+    )
+
+    skip_reason = explain_skip(state, news_event, params)
+    if skip_reason is not None:
+        bot_logger.skip(skip_reason, ts=ts, headline=text[:200],
+                        source=h.source, channel=h.channel,
+                        classification=_cls_dict(cls),
+                        n_candidates=len(candidates))
+        return
+
+    intents = decide(state, news_event, params)
+    if not intents:
+        bot_logger.skip("news_no_open_market", ts=ts, headline=text[:200],
+                        source=h.source, channel=h.channel,
+                        classification=_cls_dict(cls))
+        return
+
+    await _execute_intent(intents[0], trader, bot_logger, news_event, h)
+
+
+async def _execute_intent(
+    intent: Intent, trader: Trader, logger: BotLogger,
+    news_event: NewsEvent, headline: Headline,
+) -> None:
+    intent_id = str(uuid4())
+    loop = asyncio.get_event_loop()
+    try:
+        result = await loop.run_in_executor(
+            None, trader.place_buy_fok,
+            intent.token_id, intent.limit_price, intent.size_usdc,
+        )
+    except Exception as e:
+        logger.skip("news_classifier_error", ts=intent.ts,
+                    headline=news_event.headline[:200],
+                    source=headline.source, channel=headline.channel,
+                    error_type=type(e).__name__, error=str(e))
+        return
+
+    market_title = next(
+        (c.title for c in news_event.candidates if c.market_id == intent.market_id),
+        "",
+    )
+    cost = (float(result.filled_size) * float(result.filled_price)
+            if (result.filled_size and result.filled_price) else None)
+
+    logger.fire(
+        ts=intent.ts, intent_id=intent_id, venue="polymarket",
+        market_id=intent.market_id, market_title=market_title,
+        outcome_name=intent.outcome, side=intent.side, order_type="fok_limit",
+        size_usdc=intent.size_usdc, limit_price=intent.limit_price,
+        filled_size=float(result.filled_size) if result.filled_size else None,
+        filled_price=float(result.filled_price) if result.filled_price else None,
+        cost_usdc=cost, order_ok=result.ok, order_id=result.order_id,
+        dry_run=trader.config.dry_run,
+        condition_id=intent.condition_id, token_id=intent.token_id,
+        classification=_cls_dict(news_event.classification),
+        headline=news_event.headline[:300],
+        news_source=headline.source, news_channel=headline.channel,
+        news_message_id=headline.message_id,
+        reason=intent.reason,
+    )
+    print(f"[news-alpha] FIRE {intent.outcome} @ {intent.limit_price:.3f} "
+          f"({news_event.classification.reason}) ok={result.ok}", flush=True)
+
+
 # ---- Main loop ----
 
 async def main_async() -> None:
-    # Boot config
     params = _params_from_env()
     trader_cfg = _trader_config_from_env()
-
-    api_id = int(os.environ["TG_API_ID"])
-    api_hash = os.environ["TG_API_HASH"]
-    session_name = os.environ.get("TG_SESSION_NAME", "tree_news_recorder")
-    channels_raw = os.environ.get("TG_CHANNELS", "treeofalpha")
-    channels = [c.strip().lstrip("@") for c in channels_raw.split(",") if c.strip()]
+    source_name = os.environ.get("NEWS_SOURCE", "treeofalpha_rest").lower()
 
     log_base = Path(os.environ.get("LOG_DIR", "logs"))
     bot_logger = BotLogger(bot=BOT_NAME, strategy=STRATEGY_NAME, base_dir=log_base)
@@ -156,7 +258,6 @@ async def main_async() -> None:
     state = State()
     trader = Trader(trader_cfg)
     http = httpx.Client(timeout=20.0)
-
     anthropic_client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     llm = LLMClassifier(client=anthropic_client)
 
@@ -171,148 +272,52 @@ async def main_async() -> None:
             "max_fires_per_day": params.max_fires_per_day,
         },
         dry_run=trader_cfg.dry_run,
-        channels=channels,
+        source=source_name,
         model=llm.model,
     )
-    print(f"[news-alpha] boot dry_run={trader_cfg.dry_run} channels={channels} "
+    print(f"[news-alpha] boot dry_run={trader_cfg.dry_run} source={source_name} "
           f"model={llm.model}", flush=True)
 
-    tg = TelegramClient(session_name, api_id, api_hash)
-    await tg.start()
-    resolved = []
-    for ch in channels:
-        try:
-            entity = await tg.get_entity(ch)
-            resolved.append(entity)
-            print(f"[news-alpha] subscribed: @{ch}", flush=True)
-        except Exception as e:
-            print(f"[news-alpha] failed to resolve @{ch}: {e}", flush=True)
-    if not resolved:
-        raise SystemExit("no Telegram channels resolved")
+    # Pick the source module.
+    if source_name == "treeofalpha_rest":
+        from src.strategies.news_alpha.sources import treeofalpha_rest as src_mod
+    elif source_name == "telegram":
+        from src.strategies.news_alpha.sources import telegram as src_mod
+    else:
+        raise SystemExit(f"unknown NEWS_SOURCE={source_name!r}")
 
-    @tg.on(events.NewMessage(chats=resolved))
-    async def on_message(event: events.NewMessage.Event) -> None:
-        msg = event.message
-        text = msg.message or ""
-        ts = (msg.date or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    queue: asyncio.Queue[Headline] = asyncio.Queue(maxsize=10_000)
+    src_task = asyncio.create_task(src_mod.run(queue))
 
-        # Stage 1: keyword prefilter (free, instant)
-        hit = keyword_prefilter(text)
-        if hit is None:
-            # Don't log every prefilter miss — too noisy. Sample 1% if needed.
-            return
+    async def consume() -> None:
+        while True:
+            h = await queue.get()
+            try:
+                await _process_headline(
+                    h, llm=llm, params=params, state=state,
+                    bot_logger=bot_logger, trader=trader, http=http,
+                )
+            except Exception as e:
+                # Defensive: never let one bad headline kill the bot.
+                print(f"[news-alpha] process error on {h.message_id}: "
+                      f"{type(e).__name__}: {e}", flush=True)
 
-        # Stage 2: LLM classification
-        try:
-            cls = llm.classify(text, prefilter=hit)
-        except Exception as e:
-            bot_logger.skip("news_classifier_error", ts=ts, headline=text[:200],
-                            error_type=type(e).__name__, error=str(e))
-            return
+    consumer_task = asyncio.create_task(consume())
 
-        # Asset must be one we scan, otherwise discovery returns nothing.
-        if cls.asset not in _ASSETS_TO_SCAN:
-            bot_logger.skip("news_asset_out_of_scope", ts=ts, headline=text[:200],
-                            classification=_cls_dict(cls))
-            return
-
-        # Discover open markets for this asset (sync HTTP; could be moved to executor)
-        loop = asyncio.get_event_loop()
-        candidates = await loop.run_in_executor(None, _gather_candidates, cls.asset, http)
-
-        news_event = NewsEvent(
-            ts=ts,
-            headline=text,
-            classification=cls,
-            candidates=tuple(candidates),
-        )
-
-        # Predict skip before calling decide (so we can log it cleanly)
-        skip_reason = explain_skip(state, news_event, params)
-        if skip_reason is not None:
-            bot_logger.skip(skip_reason, ts=ts, headline=text[:200],
-                            classification=_cls_dict(cls),
-                            n_candidates=len(candidates))
-            return
-
-        intents = decide(state, news_event, params)
-        if not intents:
-            # Defensive — explain_skip and decide should agree, but just in case
-            bot_logger.skip("news_no_open_market", ts=ts, headline=text[:200],
-                            classification=_cls_dict(cls))
-            return
-
-        intent = intents[0]
-        await _execute_intent(intent, trader, bot_logger, news_event)
-
-    print("[news-alpha] listening for headlines...", flush=True)
+    done, pending = await asyncio.wait(
+        [src_task, consumer_task], return_when=asyncio.FIRST_COMPLETED,
+    )
+    for t in pending:
+        t.cancel()
     try:
-        await tg.run_until_disconnected()
+        for t in done:
+            exc = t.exception()
+            if exc is not None:
+                bot_logger.crashed(exc)
+                raise exc
     finally:
         bot_logger.shutdown(reason="normal")
         http.close()
-
-
-def _cls_dict(c: Classification) -> dict[str, Any]:
-    return {
-        "asset": c.asset,
-        "direction": c.direction,
-        "confidence": c.confidence,
-        "horizon_min": c.horizon_min,
-        "reason": c.reason,
-    }
-
-
-async def _execute_intent(intent: Intent, trader: Trader, logger: BotLogger,
-                          news_event: NewsEvent) -> None:
-    """Run trader.place_buy_fok off-thread and log a fire row."""
-    intent_id = str(uuid4())
-    loop = asyncio.get_event_loop()
-    try:
-        result = await loop.run_in_executor(
-            None,
-            trader.place_buy_fok,
-            intent.token_id, intent.limit_price, intent.size_usdc,
-        )
-    except Exception as e:
-        logger.skip("news_classifier_error", ts=intent.ts,  # repurpose for exec err
-                    headline=news_event.headline[:200],
-                    error_type=type(e).__name__, error=str(e))
-        return
-
-    # Find the candidate market title for richer logging
-    market_title = next(
-        (c.title for c in news_event.candidates if c.market_id == intent.market_id),
-        "",
-    )
-    cost = (float(result.filled_size) * float(result.filled_price)
-            if (result.filled_size and result.filled_price) else None)
-
-    logger.fire(
-        ts=intent.ts,
-        intent_id=intent_id,
-        venue="polymarket",
-        market_id=intent.market_id,
-        market_title=market_title,
-        outcome_name=intent.outcome,
-        side=intent.side,
-        order_type="fok_limit",
-        size_usdc=intent.size_usdc,
-        limit_price=intent.limit_price,
-        filled_size=float(result.filled_size) if result.filled_size else None,
-        filled_price=float(result.filled_price) if result.filled_price else None,
-        cost_usdc=cost,
-        order_ok=result.ok,
-        order_id=result.order_id,
-        dry_run=trader.config.dry_run,
-        condition_id=intent.condition_id,
-        token_id=intent.token_id,
-        classification=_cls_dict(news_event.classification),
-        headline=news_event.headline[:300],
-        reason=intent.reason,
-    )
-    print(f"[news-alpha] FIRE {intent.outcome} @ {intent.limit_price:.3f} "
-          f"({news_event.classification.reason}) ok={result.ok}", flush=True)
 
 
 def main() -> int:

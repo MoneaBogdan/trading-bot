@@ -1,18 +1,18 @@
 # Overlay compose file for the news_alpha bot.
 #
-# This is SEPARATE from the main docker-compose.yml because the news bot has
+# SEPARATE from the main docker-compose.yml because the news bot has
 # preconditions the price-driven bots don't:
 #
-#   1. A `.session` file from a one-time interactive Telegram login (Telethon
-#      needs your phone + SMS code the first time). Run the recorder locally
-#      first to create it, then copy `tree_news_recorder.session` to the
-#      server beside docker-compose.yml.
+#   1. A `.env.news` file (copy from `.env.news.example`, fill in
+#      ANTHROPIC_API_KEY + the same Polymarket creds as polymarket/.env).
+#      Required regardless of source.
 #
-#   2. A `.env.news` file (copy from `.env.news.example`, fill in TG_API_ID,
-#      TG_API_HASH, ANTHROPIC_API_KEY, and the same Polymarket creds as
-#      polymarket/.env).
+#   2. If NEWS_SOURCE=telegram: a `.session` file from a one-time interactive
+#      Telegram login (Telethon needs your phone + SMS code the first time).
+#      Run the recorder locally first to create it. NOT required for the
+#      default NEWS_SOURCE=treeofalpha_rest.
 #
-# Once both exist, bring up alongside the main stack:
+# Once preconditions are met, bring up alongside the main stack:
 #
 #   docker compose -f docker-compose.yml -f docker-compose.news.yml up -d
 #
@@ -37,9 +37,10 @@ services:
     volumes:
       - ./polymarket/logs:/app/polymarket/logs
       - ./polymarket/polymarket_creds.json:/app/polymarket/polymarket_creds.json
-      # The Telegram session file lives at repo root. The runner reads
-      # TG_SESSION_NAME (default 'tree_news_recorder') — Telethon appends
-      # '.session'. Mount the whole file in.
+      # Telegram session file — only used when NEWS_SOURCE=telegram. The bind
+      # mount is harmless for the default REST mode if the file doesn't exist
+      # OR if it's just an empty file (you can `touch tree_news_recorder.session`
+      # on the host if Docker complains about a missing mount source).
       - ./tree_news_recorder.session:/app/tree_news_recorder.session
     working_dir: /app
     command: ["python", "-m", "src.bots.news_alpha_runner"]

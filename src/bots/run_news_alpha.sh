@@ -18,3 +18,4 @@ set +a
 mkdir -p logs/news "logs/bot=news-alpha"
 
 exec python -m src.bots.news_alpha_runner
+

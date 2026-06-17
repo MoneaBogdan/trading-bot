@@ -24,8 +24,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-# Make repo root importable so `polymarket.*` and `src.*` both work.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+# Make repo root + polymarket dir importable.
+# - repo root → `src.*` imports
+# - polymarket dir → `gamma`, `clob`, `trader` (bare imports, matching live_trader.py)
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "polymarket"))
 
 try:
     from telethon import TelegramClient, events
@@ -57,10 +61,10 @@ from src.strategies.news_alpha.strategy import (
     explain_skip,
 )
 
-# Polymarket integration
-from polymarket.gamma import discover_markets, BtcMarket  # noqa: E402
-from polymarket.clob import get_orderbook  # noqa: E402
-from polymarket.trader import Trader, TraderConfig  # noqa: E402
+# Polymarket integration (bare imports; polymarket/ is on sys.path above)
+from gamma import discover_markets, BtcMarket  # noqa: E402
+from clob import get_orderbook  # noqa: E402
+from trader import Trader, TraderConfig  # noqa: E402
 
 
 BOT_NAME = "news-alpha"

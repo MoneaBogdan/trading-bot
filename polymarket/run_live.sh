@@ -11,6 +11,9 @@ mkdir -p "$LOG_DIR"
 
 ASSET="${ASSET:-BTC}"
 TIMEFRAME_MIN="${TIMEFRAME_MIN:-5}"
+# Optional suffix to distinguish two variants with the same asset+timeframe
+# (e.g. VARIANT_SUFFIX=wide → eth-5m-wide). Empty = legacy behavior.
+VARIANT_SUFFIX="${VARIANT_SUFFIX:-}"
 
 THRESHOLD="${THRESHOLD:-0.10}"
 COOLDOWN="${COOLDOWN:-60}"
@@ -25,6 +28,9 @@ REQUIRE_WINDOW_ANCHOR="${REQUIRE_WINDOW_ANCHOR:-1}"
 # Variant tag used in log filenames. Special-case BTC 5m to keep the legacy
 # `live_<date>.jsonl` filename and preserve backward compatibility with old logs.
 VARIANT="$(echo "$ASSET" | tr '[:upper:]' '[:lower:]')-${TIMEFRAME_MIN}m"
+if [ -n "$VARIANT_SUFFIX" ]; then
+  VARIANT="${VARIANT}-${VARIANT_SUFFIX}"
+fi
 if [ "$VARIANT" = "btc-5m" ]; then
   FILE_TAG=""        # legacy: logs/live_YYYYMMDD.{log,jsonl}
 else
@@ -53,6 +59,7 @@ while true; do
     --sweet-lo "$SWEET_LO" \
     --sweet-hi "$SWEET_HI" \
     --snipe-window-s "$SNIPE_WINDOW_S" \
+    --variant-suffix "$VARIANT_SUFFIX" \
     $CONFIRM_FLAG \
     $ANCHOR_FLAG \
     --log "$JSONL_LOG" \

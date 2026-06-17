@@ -299,12 +299,19 @@ def main() -> int:
                     help="only fire when seconds-to-close <= this (smaller = less reversal risk, fewer fires)")
     ap.add_argument("--require-window-anchor", action="store_true",
                     help="require window-open-vs-now return to agree with 60s return (sign check)")
+    ap.add_argument("--variant-suffix", default=os.environ.get("VARIANT_SUFFIX", ""),
+                    help="optional suffix to distinguish two variants with the same asset+timeframe "
+                         "(e.g. 'wide' → bot_name=eth-5m-wide). Empty = default behavior.")
     ap.add_argument("--log", default=None,
-                    help="JSONL trade record path; defaults to logs/live_<asset>-<tf>m_<date>.jsonl")
+                    help="JSONL trade record path; defaults to logs/live_<asset>-<tf>m[-suffix]_<date>.jsonl")
     args = ap.parse_args()
 
+    suffix = (args.variant_suffix or "").strip()
+    variant = f"{args.asset.lower()}-{args.timeframe_min}m"
+    if suffix:
+        variant = f"{variant}-{suffix}"
+
     if args.log is None:
-        variant = f"{args.asset.lower()}-{args.timeframe_min}m"
         # Preserve legacy filename for the existing BTC-5m bot to keep
         # backward-compat with old logs and downstream tooling.
         if variant == "btc-5m":
@@ -315,7 +322,7 @@ def main() -> int:
     log_path = Path(args.log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
-    bot_name = f"{args.asset.lower()}-{args.timeframe_min}m"
+    bot_name = variant
     bot_logger = BotLogger(
         bot=bot_name,
         strategy="PolymarketLatencyArb",

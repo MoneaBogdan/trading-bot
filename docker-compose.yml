@@ -56,6 +56,22 @@ services:
       THRESHOLD: "0.20"
       REQUIRE_CONFIRM: "1"
 
+  # Stage A sweet-band rollout: ETH 5m variant with WIDE band [0.10, 0.70] for
+  # A/B comparison against the baseline trader-eth-5m. Logs to a separate
+  # variant-tagged filename via VARIANT_SUFFIX=wide → bot=eth-5m-wide.
+  trader-eth-5m-wide:
+    <<: *image
+    container_name: polymarket-trader-eth-5m-wide
+    command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: ETH
+      TIMEFRAME_MIN: "5"
+      THRESHOLD: "0.13"
+      REQUIRE_CONFIRM: "1"
+      SWEET_LO: "0.10"
+      SWEET_HI: "0.70"
+      VARIANT_SUFFIX: "wide"
+
   # --- Hourly markets (Binance-only resolution → Coinbase confirm disabled) ---
 
   trader-btc-1h:

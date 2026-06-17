@@ -55,6 +55,7 @@ Seven long-lived processes — all supervised by docker-compose (`restart: unles
 | `trader-btc-1h` | BTC | 60 min | 0.10% | **no** | Binance-only resolution — Coinbase confirm dropped |
 | `trader-eth-1h` | ETH | 60 min | 0.13% | **no** | Binance-only resolution |
 | `trader-sol-1h` | SOL | 60 min | 0.20% | **no** | Binance-only resolution |
+| `trader-eth-5m-wide` | ETH | 5 min | 0.13% | yes | Stage A — wide sweet band `[0.10, 0.70]` (A/B vs baseline `trader-eth-5m`) |
 
 Each writes its own log files (see below). All run dry-run by default.
 
@@ -74,8 +75,10 @@ All log paths are inside the container at `/app/polymarket/logs/`, mounted to th
 Examples:
 - `logs/live_20260615.log` / `.jsonl` — the original BTC-5m bot (preserves historical logs)
 - `logs/live_eth-5m_20260616.jsonl` — new ETH 5-min variant
+- `logs/live_eth-5m-wide_20260616.jsonl` — Stage A wide-band ETH 5-min variant (VARIANT_SUFFIX=wide)
 - `logs/live_btc-60m_20260616.jsonl` — new BTC hourly variant (variant tag uses minutes, not "1h")
 - `logs/bot=btc-60m/2026-06-16.jsonl` — new-schema per-bot log (Phase B parallel logger)
+- `logs/bot=eth-5m-wide/2026-06-16.jsonl` — Stage A new-schema log
 - `logs/orderbook_ws_20260616.{log,jsonl}` — shared WS recorder
 
 | File | Producer | Content |
@@ -94,14 +97,14 @@ Quick checks after deploy:
 ```bash
 ls -lah polymarket/logs/                                            # all variants growing?
 docker compose ps                                                    # all 7 services Up?
-for v in '' eth-5m_ sol-5m_ btc-60m_ eth-60m_ sol-60m_; do
+for v in '' eth-5m_ eth-5m-wide_ sol-5m_ btc-60m_ eth-60m_ sol-60m_; do
   f="polymarket/logs/live_${v}$(date -u +%Y%m%d).jsonl"
   [ -f "$f" ] && echo "$f: $(wc -l < "$f") fires"
 done
 tail -f polymarket/logs/live_eth-5m_$(date -u +%Y%m%d).log          # watch any variant live
 
 # Phase B new-schema check: every variant should have a boot event today
-for v in btc-5m eth-5m sol-5m btc-60m eth-60m sol-60m; do
+for v in btc-5m eth-5m eth-5m-wide sol-5m btc-60m eth-60m sol-60m; do
   f="polymarket/logs/bot=$v/$(date -u +%F).jsonl"
   echo -n "$v: "
   [ -f "$f" ] && head -1 "$f" | python3 -c "import json,sys;print(json.load(sys.stdin)['event'])" || echo "NO FILE"

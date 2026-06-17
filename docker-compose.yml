@@ -1,8 +1,8 @@
 # Multi-variant Polymarket Up/Down latency-arb bot.
 #
-# Six trader services (one per asset × timeframe variant) all share one image.
-# A single ws-recorder captures the L2 orderbook for retroactive fill validation
-# and backtesting — no need to duplicate it per variant.
+# Seven trader services (six per asset × timeframe + a wide-band tail probe)
+# all share one image. A single ws-recorder captures the L2 orderbook for
+# retroactive fill validation and backtesting.
 #
 # Each trader writes to its own variant-tagged log file under
 # polymarket/logs/. The legacy BTC-5m variant keeps the original
@@ -10,6 +10,13 @@
 #
 # All variants run dry-run by default (POLY_DRY_RUN=true in .env). Flip
 # variants live one at a time after watching dry-run output for a few days.
+#
+# Sweet-band history:
+#   2026-06-16 → original: SWEET=[0.30, 0.40] (defaults in run_live.sh).
+#   2026-06-17 → main bots updated to [0.60, 0.75] after 22.5h backtest
+#                showed edge concentrates in that bucket (see
+#                reports/STRATEGY_FINDINGS.md). eth-5m-wide refocused to
+#                [0.75, 0.90] to gather more data on the tail bucket.
 
 x-image: &image
   build:
@@ -35,6 +42,8 @@ services:
       TIMEFRAME_MIN: "5"
       THRESHOLD: "0.10"
       REQUIRE_CONFIRM: "1"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
 
   trader-eth-5m:
     <<: *image
@@ -45,6 +54,8 @@ services:
       TIMEFRAME_MIN: "5"
       THRESHOLD: "0.13"
       REQUIRE_CONFIRM: "1"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
 
   trader-sol-5m:
     <<: *image
@@ -55,10 +66,13 @@ services:
       TIMEFRAME_MIN: "5"
       THRESHOLD: "0.20"
       REQUIRE_CONFIRM: "1"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
 
-  # Stage A sweet-band rollout: ETH 5m variant with WIDE band [0.10, 0.70] for
-  # A/B comparison against the baseline trader-eth-5m. Logs to a separate
-  # variant-tagged filename via VARIANT_SUFFIX=wide → bot=eth-5m-wide.
+  # Tail-bucket probe — ETH 5m with band [0.75, 0.90]. The 2026-06-17 backtest
+  # showed mixed signals above 0.75 (some buckets profitable, some not). This
+  # variant captures more data specifically in that range. Separate logs via
+  # VARIANT_SUFFIX=wide → bot=eth-5m-wide.
   trader-eth-5m-wide:
     <<: *image
     container_name: polymarket-trader-eth-5m-wide
@@ -68,11 +82,13 @@ services:
       TIMEFRAME_MIN: "5"
       THRESHOLD: "0.13"
       REQUIRE_CONFIRM: "1"
-      SWEET_LO: "0.10"
-      SWEET_HI: "0.70"
+      SWEET_LO: "0.75"
+      SWEET_HI: "0.90"
       VARIANT_SUFFIX: "wide"
 
   # --- Hourly markets (Binance-only resolution → Coinbase confirm disabled) ---
+  # Note: hourly bots are largely idle (95%+ no_market_in_window skips). The
+  # sweet-band tweak is for consistency; doesn't materially change behavior.
 
   trader-btc-1h:
     <<: *image
@@ -83,6 +99,8 @@ services:
       TIMEFRAME_MIN: "60"
       THRESHOLD: "0.10"
       REQUIRE_CONFIRM: "0"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
 
   trader-eth-1h:
     <<: *image
@@ -93,6 +111,8 @@ services:
       TIMEFRAME_MIN: "60"
       THRESHOLD: "0.13"
       REQUIRE_CONFIRM: "0"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
 
   trader-sol-1h:
     <<: *image
@@ -103,6 +123,8 @@ services:
       TIMEFRAME_MIN: "60"
       THRESHOLD: "0.20"
       REQUIRE_CONFIRM: "0"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
 
   # --- WS recorder: shared, captures orderbook for retroactive validation ---
 

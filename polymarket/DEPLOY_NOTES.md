@@ -28,8 +28,8 @@ Defaults live in `run_live.sh`; override via env vars. Values below are the ones
 | `REQUIRE_WINDOW_ANCHOR` | `1` | Require BTC-now vs window-open return to agree with 60s return. |
 | `THRESHOLD` | `0.10` | Min % move (60s) to consider a signal. |
 | `COOLDOWN` | `60` | Seconds between fires. |
-| `SWEET_LO` | `0.30` | Lower edge of Polymarket price band. |
-| `SWEET_HI` | `0.40` | Upper edge — tightened from 0.45 on 2026-06-08 (live win-rate split). |
+| `SWEET_LO` | `0.60` | Lower edge of Polymarket price band. |
+| `SWEET_HI` | `0.75` | Upper edge. Widened from `[0.30, 0.40]` on 2026-06-17 after the 22.5h sweet-band counterfactual backtest showed the [0.60, 0.75] bucket carries the strongest per-fire edge (see `reports/STRATEGY_FINDINGS.md`). |
 | `SNIPE_WINDOW_S` | `300` | Max secs-to-close at fire time. 300 disables the tight snipe — anchor alone is the EV-max. |
 
 ## Required secrets (NOT in repo)
@@ -55,7 +55,7 @@ Seven long-lived processes — all supervised by docker-compose (`restart: unles
 | `trader-btc-1h` | BTC | 60 min | 0.10% | **no** | Binance-only resolution — Coinbase confirm dropped |
 | `trader-eth-1h` | ETH | 60 min | 0.13% | **no** | Binance-only resolution |
 | `trader-sol-1h` | SOL | 60 min | 0.20% | **no** | Binance-only resolution |
-| `trader-eth-5m-wide` | ETH | 5 min | 0.13% | yes | Stage A — wide sweet band `[0.10, 0.70]` (A/B vs baseline `trader-eth-5m`) |
+| `trader-eth-5m-wide` | ETH | 5 min | 0.13% | yes | Tail-bucket probe — sweet band `[0.75, 0.90]` (A/B vs main bots on `[0.60, 0.75]`) |
 
 Each writes its own log files (see below). All run dry-run by default.
 

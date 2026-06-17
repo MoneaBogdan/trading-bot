@@ -1,0 +1,45 @@
+# Overlay compose file for the news_alpha bot.
+#
+# This is SEPARATE from the main docker-compose.yml because the news bot has
+# preconditions the price-driven bots don't:
+#
+#   1. A `.session` file from a one-time interactive Telegram login (Telethon
+#      needs your phone + SMS code the first time). Run the recorder locally
+#      first to create it, then copy `tree_news_recorder.session` to the
+#      server beside docker-compose.yml.
+#
+#   2. A `.env.news` file (copy from `.env.news.example`, fill in TG_API_ID,
+#      TG_API_HASH, ANTHROPIC_API_KEY, and the same Polymarket creds as
+#      polymarket/.env).
+#
+# Once both exist, bring up alongside the main stack:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.news.yml up -d
+#
+# Or just this overlay if the main stack is already running:
+#
+#   docker compose -f docker-compose.news.yml up -d news-alpha
+#
+# The bot defaults to POLY_DRY_RUN=true; flip only when dry-run looks clean.
+
+services:
+  news-alpha:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polymarket-bot:latest
+    container_name: polymarket-news-alpha
+    restart: unless-stopped
+    env_file:
+      - ./.env.news
+    environment:
+      LOG_DIR: /app/polymarket/logs
+    volumes:
+      - ./polymarket/logs:/app/polymarket/logs
+      - ./polymarket/polymarket_creds.json:/app/polymarket/polymarket_creds.json
+      # The Telegram session file lives at repo root. The runner reads
+      # TG_SESSION_NAME (default 'tree_news_recorder') — Telethon appends
+      # '.session'. Mount the whole file in.
+      - ./tree_news_recorder.session:/app/tree_news_recorder.session
+    working_dir: /app
+    command: ["python", "-m", "src.bots.news_alpha_runner"]

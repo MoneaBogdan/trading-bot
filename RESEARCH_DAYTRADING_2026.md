@@ -119,3 +119,103 @@ HLP inherited a forced short on JELLYJELLY; attacker pumped spot 250%; validator
 - **Initial universe:** BTC, ETH, SOL only — defer alts until JELLY-style oracle risk is understood in practice
 - **Go-live gates:** N days of paper-PnL > break-even APR after modeled slippage; manual review of every "would-have-fired" event
 
+---
+
+## Round 2 follow-up: 10-agent concentrated sweep (2026-06-18)
+
+Ten parallel agents went deeper on the open gaps. Key findings:
+
+### ⚠ Funding-arb edge has compressed — re-baseline the HL bot
+
+The "3-12% net APR on BTC/ETH/SOL" claim is upper-band only. Post-Oct-10-2025 ADL cascade (HL force-closed $10B+, first ADL in two years, several delta-neutral funds went accidentally naked-long when shorts ADL'd while spot collateral simultaneously liquidated), realistic baseline is **3-6% net** on majors — roughly in line with sUSDe (~3.7% Q1 2026) and CME basis (~5%). Major absorbers: Ethena USDe (~$5.5-6B supply Q2 2026) and CME basis HFs ([BitMEX Q3 2025](https://www.bitmex.com/blog/2025q3-derivatives-report), [CoinDesk Oct 11 2025](https://www.coindesk.com/markets/2025/10/11/largest-ever-crypto-liquidation-event-wipes-out-6-300-wallets-on-hyperliquid), [Stablecoin Insider Q1 2026](https://stablecoininsider.org/ethena-usde-q1-2026-report/), [NeuralArb Apr 2026](https://www.neuralarb.com/2026/04/24/hyperliquid-vs-cexs-perp-arbitrage-after-fees-funding-slippage/)).
+
+**Where the asymmetric edge actually lives in mid-2026:**
+1. **HL HIP-1 long-tail pre-CEX listings** — funding hits the 4%/hr cap on thin books, 20-60%+ APR ranges. But this is exactly where JELLY-style oracle-override risk concentrates → fundamental tension with our "BTC/ETH/SOL only" constraint
+2. **Cross-DEX divergence** (HL vs Drift / Lighter / Aster) — peaks >20% APR during divergences, persistent in 2026 ([Bitsgap 2026](https://bitsgap.com/blog/same-position-four-different-bills-how-funding-rates-differ-across-perp-dexs-in-2026))
+3. **Vol/news regimes** — ADL risk asymmetric, expensive when wrong
+
+**Implication:** let the monitor run; if 7 days of paper-PnL on majors averages <3% net APR, pivot to either (a) cross-DEX perp basis (Lighter is the highest-divergence next venue) or (b) accept HIP-1 long-tails with explicit oracle-deviation kill switch.
+
+### DEX perp expansion path (when ready)
+
+Rank-ordered next venues for delta-neutral funding arb beyond HL:
+
+| Venue | TVL | Typical HL spread | Python ergonomics | Notes |
+|---|---|---|---|---|
+| **Lighter** (own zk-rollup) | ~$487M | ±5-15 bps/8h | Thin (community wrappers only) | Wide funding band, best signal-to-noise |
+| **Drift** (Solana) | ~$600M+ | ±3-10 bps/8h, wider on alts | Best — official [DriftPy](https://drift-labs.github.io/driftpy/) | Sol RPC latency is the gotcha |
+| **Aster** | ~$1.2B | ±5-20 bps/8h (incentive-distorted) | [Binance-style API](https://docs.asterdex.com/) | Token-flow distortions complicate signal |
+| **dYdX v4** | ~$1B | ±2-5 bps/8h | Mature SDK | Tight spreads on majors, integrate only for depth |
+| **Vertex** | smaller | ±5-15 bps/8h | Official [Python SDK](https://vertex-protocol.github.io/vertex-python-sdk/) | Ink/Move migration risk; defer |
+| ~~Aevo~~ | $15.7M | — | — | Dead liquidity, skip |
+| ~~GMX v2 / Jupiter~~ | — | borrow-fee model | — | Not funding-arb venues |
+
+### Futures path #2 — Topstep + project-x-py is real
+
+The "Python on futures props requires C# / NinjaScript" assumption is wrong in 2026:
+
+- **TopstepX API** GA April 2026 — REST + SignalR WS, JWT auth, $29/mo ($14.50 if active trader). `project-x-py` ([PyPI](https://pypi.org/project/project-x-py/)) is a mature async Python SDK. **No CME ILA surcharge** unlike Tradovate ($290-500/mo).
+- **Gotcha:** TopstepX terms require local execution — "no VPS/cloud" technically against ToS. Home server qualifies; cloud-only deployment is a rule break.
+- **ORB+VWAP modal config** (TradingView/NT8 scripts on MNQ/MES, 2025-26): 15-min OR (9:30-9:45 ET), entry window closes 11:00 ET, 5-min close confirmation outside OR, session VWAP anchored 9:30 ET, volume >1.5× 20-bar SMA, TP 120-300 ticks, SL 60-150 ticks ([MNQ ORB TV script](https://www.tradingview.com/script/khcR5SPp-MNQ-ORB-Strategy-VWAP-Bias/)).
+- **Eval killers:** Topstep's 50% consistency rule (best day ≤ 50% of total PnL) blocks one-shot algos. MFFu's ±2-min news blackout on every scheduled release is the silent killer.
+- **Realistic build:** 2-3 weeks on Topstep+project-x-py for ORB/VWAP. MFFu adds ~1 week for news scheduling. NinjaScript is a dead end for a Python+Docker shop.
+
+### FX path #3 — Atlas + TradeLocker beats FTMO + MT5
+
+- **Atlas Funded 2-Step has no consistency rule at any stage** ([Atlas](https://www.atlasfunded.com/post/prop-firms-with-no-consistency-rules)) — friendly to lumpy sweep-PnL.
+- **TradeLocker has a documented REST/WS API** — Python-native, skip MT5 entirely. Cleanest path for a Python+Docker shop.
+- **FTMO** allows EAs only on MT4/MT5/cTrader. cTrader Open API > MT5+MetaApi > headless MT5 Windows VPS. **DXtrade is dead** for FX automation — FTMO killed REST API access 27 Apr 2024 ([FTMO 2024-04-25 update](https://ftmo.com/en/blog/trading-updates/trading-update-25-apr-2024/)).
+- **MetaApi.cloud** has Trustpilot reliability flags (multi-day outages reported) — don't make it the sole path to a funded account.
+- **EURUSD London kill-zone** (07:00-11:00 GMT) is the only sweep-reversal setup with credible numbers: prior swing taken on wick + close back inside + rejection bar, ~60-70% WR @ 1:2R per published backtests (treat selection-biased — expect 50-55% after slippage and ≥2-min FTMO hold floor).
+- **Realistic build:** closer to 2 months than 2 weeks. The 6 weeks go into Forex Factory scraper reliability, per-firm rule encoding, realistic tick-replay backtest, MT5/Windows babysitting (if not using TradeLocker), and one full Challenge cycle to flush unanticipated rule violations.
+
+### Skip order-flow automation (cost-to-edge ratio is poor)
+
+- **Data cost:** Databento CME at $199/mo for MBP-10 + MBO is the cleanest Python-native path. Rithmic is cheaper if you tolerate FIX/R-API.
+- **Codable features:** OFI, CVD, delta-divergence, basic absorption are deterministic. Exhaustion + iceberg-detection bleed into judgment.
+- **Public evidence:** OFI lineage well-validated (Cont/Kukanov OFI explains 65-87% of short-term mid-price variance, multiple 2024-25 replications). **Zero 2025-26 papers** validate Bookmap-style footprint patterns (absorption/exhaustion visuals) as ML features with OOS edge on MES/MNQ net of fees.
+- **If still tempted:** Databento + NautilusTrader + code only OFI + CVD-divergence as a *filter* on an existing strategy. Budget 2 weeks max. Funding arb has near-zero data cost and a mechanical (not statistical) edge mechanism.
+
+### NautilusTrader is the single framework worth standardizing on
+
+For any v2 of the bots:
+
+- **NautilusTrader** (Rust core, Py API, v1.227 May 2026, ~17k stars) is the only OSS framework that genuinely earns "production-grade" in 2026
+- Multi-asset adapters: Binance/Bybit/Coinbase/OKX spot+perp, dYdX, IB, Databento (CME futures), new Uniswap/Pancake/Aerodrome DeFi adapter (Jun 2026)
+- Event-driven, **deterministic sim==live semantics** (sim and live run the same code path)
+- One codebase could handle ORB+VWAP on CL futures AND funding arb on ETH-PERP
+
+Data combo: **NautilusTrader + Databento (CME MBO PAYG, ~$300-800 for 6mo ES+CL+NQ) + Tardis.dev (crypto perps, ~$3.5-4k for 6mo full L2+funding)**. Binance free dumps work if you only need aggTrades + L1 snapshots.
+
+### Verified practitioners (still thin overall)
+
+- **Crypto perps:** HLP vault (cleanest auditable on-chain delta-neutral benchmark at [stats.hyperliquid.xyz](https://stats.hyperliquid.xyz/)), Growi HF vault (multi-month track record since July 2024, HFT MM — not retail-codifiable). **No public X account passes the "wallet + 6 months positive Sharpe" bar** — be skeptical of HL "callers."
+- **ES/NQ futures:** Topstep Big Board top-10 funded P&L is the public leaderboard ([Topstep payout policy](https://help.topstep.com/en/articles/8284233-topstep-payout-policy)) — rotates monthly, mostly discretion + ORB.
+- **FX:** Myfxbook "Systems" verified-track + verified-privilege filter, Kinfo broker-attested. Sort by **max DD, not gain** — most top systems are grid/martingale.
+- **Codifiable reference:** [Rob Carver / pysystemtrade](https://github.com/pst-group/pysystemtrade) — systematic futures, methodology + code public, modest but real Sharpe.
+
+### Communities (best signal-to-noise)
+
+- **Crypto bot peer review:** [Freqtrade Discord](https://github.com/freqtrade/freqtrade) is the highest-signal free option. Strategy code, hyperopt, exchange quirks.
+- **Engine/architecture critique:** [NautilusTrader Discussions](https://github.com/nautechsystems/nautilus_trader/discussions) — maintainers answer directly.
+- **Free daily firehose:** [Quantocracy](https://quantocracy.com/).
+- **Paid (code-density):** [Quantitativo](https://www.quantitativo.com/) (~$15/mo).
+- **Skip:** every "algo trading" Discord on disboard — almost all are signal/copy-trade/prop-firm funnels.
+
+### Newsletters worth paying for
+
+1. **Quantitativo** — weekly backtested strategies with full Python code
+2. **Concretum Group** — vol-risk-premium + trend-following, peer-reviewed-style papers
+3. **Angus SLQ** — 5 live quant systems, monthly equity curves, Quantiacs Q22 winner 2025
+
+---
+
+## Revised priority order (post round-2)
+
+1. ✅ **HL funding monitor** — running. **Decision threshold:** if 7 days paper-PnL averages <3% net APR on majors, pivot to cross-DEX (add Lighter / Drift) BEFORE building the executor.
+2. **TopstepX + project-x-py ORB/VWAP on MNQ** — 2-3 week build, real Python path, no NinjaScript. Better-defined than the FX sweep play.
+3. **NautilusTrader migration** — when HL bot needs phase 2 executor, write it on Nautilus instead of bespoke. Sets up v2 of Polymarket bot to share the same engine.
+4. ~~FX sweep-reversal~~ — defer until #2 ships. 2-month build is too speculative vs the Topstep path's deterministic mechanics.
+5. ~~Order-flow~~ — skip unless #1 fails and we have nothing better.
+
+

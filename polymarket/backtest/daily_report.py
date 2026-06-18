@@ -110,6 +110,9 @@ def _resolve_markets(condition_ids: set[str], date: str) -> dict[str, str]:
                     "order": "endDate", "ascending": "true",
                 },
             )
+            if r.status_code == 422:
+                # gamma caps offset; treat as end-of-results
+                break
             r.raise_for_status()
             data = r.json()
             if not data:
@@ -200,6 +203,8 @@ def _market_context(date: str) -> dict[str, Any]:
                     "order": "endDate", "ascending": "true",
                 },
             )
+            if r.status_code == 422:
+                break
             r.raise_for_status()
             data = r.json()
             if not data:
@@ -217,12 +222,21 @@ def _market_context(date: str) -> dict[str, Any]:
                         break
                 if not asset:
                     continue
-                # TF detection from title: 5m events have a "HH:MMAM-HH:MMAM" range,
-                # hourly events have just "HHPM ET". gamma's startDate is event-creation
-                # time, not the betting window — don't use it.
+                # TF detection from title: ranged events have "HH:MMAM-HH:MMAM"
+                # (5m or 15m — compute duration), hourly events have just "HHPM ET".
+                # gamma's startDate is event-creation time, not the betting window — don't use it.
                 import re as _re
-                if _re.search(r"\d{1,2}:\d{2}(AM|PM)-\d{1,2}:\d{2}(AM|PM)", title):
-                    tf = 5
+                _rng = _re.search(
+                    r"(\d{1,2}):(\d{2})(AM|PM)-(\d{1,2}):(\d{2})(AM|PM)", title)
+                if _rng:
+                    _h1, _m1, _ap1, _h2, _m2, _ap2 = _rng.groups()
+                    def _to_min(h, m, ap):
+                        hh = int(h) % 12
+                        if ap.upper() == "PM":
+                            hh += 12
+                        return hh * 60 + int(m)
+                    _dur = (_to_min(_h2, _m2, _ap2) - _to_min(_h1, _m1, _ap1)) % (24 * 60)
+                    tf = _dur if _dur in (5, 15) else _dur  # Why: keep raw duration so unknown slot cadences don't silently bucket as 5m
                 else:
                     tf = 60
                 events_seen += 1

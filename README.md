@@ -1,9 +1,10 @@
 # Polymarket BTC Up/Down latency-arb bot
 
-A containerized trading bot for Polymarket's 5-minute BTC Up/Down prediction
-markets. Streams Binance BTC trades, requires a Coinbase cross-confirmation,
-and lifts the marketable ask on the matching token when the 60-second return
-crosses a threshold and the entry sits in the validated sweet-spot price band.
+A containerized trading bot for Polymarket's 5- and 15-minute BTC/ETH/SOL
+Up/Down prediction markets. Streams Binance trades, requires a Coinbase
+cross-confirmation, and lifts the marketable ask on the matching token when the
+60-second return crosses a threshold and the entry sits in the validated
+sweet-spot price band.
 
 > **Status:** dry-run by default. The bot will not place real orders until
 > `POLY_DRY_RUN=false` in `polymarket/.env`. See **Going live** below.
@@ -12,10 +13,14 @@ crosses a threshold and the entry sits in the validated sweet-spot price band.
 
 | Service | What it does |
 |---|---|
-| `trader` | Live decision loop: Binance WS → 60s rolling return → Coinbase confirm → Polymarket fill |
-| `ws-recorder` | Logs full Polymarket L2 orderbook events for post-hoc fill validation and backtest alignment |
+| `trader-{btc,eth,sol}-5m` | Live decision loop on Polymarket's 5-minute markets: Binance WS → 60s rolling return → Coinbase confirm → Polymarket fill. Sweet band `[0.60, 0.75]`. |
+| `trader-{btc,eth,sol}-15m` | Same loop on Polymarket's 15-minute markets. Same thresholds and band as the 5m variants; Coinbase confirm on. |
+| `trader-{btc,eth,sol}-1h` | Same loop on 1-hour markets; confirm gate off. |
+| `trader-eth-5m-wide` | Tail-bucket probe on `[0.75, 0.90]`. |
+| `funding-monitor` | Polls Hyperliquid, Binance, Bybit, Drift, and Paradex for funding-rate dislocations and logs cross-DEX opportunity events. |
+| `ws-recorder` | Logs full Polymarket L2 orderbook events for post-hoc fill validation and backtest alignment. |
 
-Both run from the same image, restart unless stopped, and share `polymarket/logs/` on the host.
+All run from the same image, restart unless stopped, and share `polymarket/logs/` on the host.
 
 ## Prerequisites
 
@@ -59,6 +64,20 @@ docker compose down                           # stop both
 
 JSONL trade records and stdout logs land in `polymarket/logs/` on the host
 (persistent across container restarts).
+
+### Optional: Polymarket WS orderbook cache
+
+The trader can serve top-of-book from an in-memory cache fed by the Polymarket
+CLOB WebSocket instead of issuing an HTTPS GET per fire (~50–150 ms shaved off
+the hot path). On cache miss or a snapshot older than 5 s, it falls back to the
+HTTPS path. Opt in by exporting the env var before `up`:
+
+```bash
+POLY_BOOK_WS_CACHE=true docker compose up -d
+```
+
+All trader services read `${POLY_BOOK_WS_CACHE}` from the shell, so a single
+export toggles every variant. Default is `false`.
 
 ## Going live
 

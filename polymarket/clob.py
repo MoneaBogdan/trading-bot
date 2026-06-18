@@ -12,6 +12,24 @@ import httpx
 
 CLOB_BASE = "https://clob.polymarket.com"
 
+# Shared HTTP client reused across `get_orderbook` calls when the caller
+# doesn't supply its own. Avoids paying TCP + TLS handshake cost (typically
+# 100-300ms cold, 30-80ms warm-DNS) on every hot-path orderbook fetch.
+# `httpx.Client` is thread-safe for concurrent requests, which matters
+# because `get_orderbook` is invoked from a thread pool via run_in_executor.
+_SHARED_CLIENT: httpx.Client | None = None
+
+
+def _shared_client() -> httpx.Client:
+    global _SHARED_CLIENT
+    if _SHARED_CLIENT is None:
+        _SHARED_CLIENT = httpx.Client(
+            timeout=10.0,
+            limits=httpx.Limits(max_keepalive_connections=4, keepalive_expiry=300.0),
+            http2=False,  # CLOB is HTTP/1.1; keep-alive alone is the win
+        )
+    return _SHARED_CLIENT
+
 
 @dataclass
 class Orderbook:
@@ -26,9 +44,13 @@ class Orderbook:
 
 def get_orderbook(token_id: str, client: httpx.Client | None = None) -> Orderbook:
     """Fetch top of book for a CLOB token. Best-effort: if the endpoint shape
-    changes, returns None fields rather than raising."""
-    own = client is None
-    client = client or httpx.Client(timeout=10.0)
+    changes, returns None fields rather than raising.
+
+    When `client` is None we reuse a module-level keep-alive client. Pass an
+    explicit client only when you need isolated lifecycle (e.g. tests)."""
+    own_close = False
+    if client is None:
+        client = _shared_client()
     try:
         r = client.get(f"{CLOB_BASE}/book", params={"token_id": token_id})
         r.raise_for_status()
@@ -36,7 +58,7 @@ def get_orderbook(token_id: str, client: httpx.Client | None = None) -> Orderboo
     except Exception:
         return Orderbook(token_id, None, None, None, 0.0, 0.0, None)
     finally:
-        if own:
+        if own_close:
             client.close()
 
     bids = data.get("bids") or []

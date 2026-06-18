@@ -21,6 +21,12 @@ load_dotenv(Path(__file__).parent / ".env")
 HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 BINANCE_PERP_URL = "https://fapi.binance.com/fapi/v1/premiumIndex"
 BYBIT_PERP_URL = "https://api.bybit.com/v5/market/tickers"
+DRIFT_RATE_HISTORY_URL = "https://data.api.drift.trade/rateHistory"
+# Drift perp marketIndex mapping for assets we already track. Drift exposes
+# many more markets; we only need indices that overlap with HL_ASSETS.
+DRIFT_MARKET_INDEX = {"SOL": 0, "BTC": 1, "ETH": 2}
+PARADEX_MARKETS_SUMMARY_URL = "https://api.prod.paradex.trade/v1/markets/summary"
+PARADEX_SYMBOL = {"BTC": "BTC-USD-PERP", "ETH": "ETH-USD-PERP", "SOL": "SOL-USD-PERP"}
 LOG_DIR = Path(__file__).parent / "logs"
 
 POLL_INTERVAL_S = int(os.getenv("HL_POLL_INTERVAL_S", "30"))
@@ -52,6 +58,10 @@ class FundingSnapshot:
     binance_mark: float
     bybit_funding_8h_bps: float | None
     bybit_mark: float | None
+    drift_funding_8h_bps: float | None
+    drift_mark: float | None
+    paradex_funding_8h_bps: float | None
+    paradex_mark: float | None
 
     def best_cross(self) -> tuple[str, float] | None:
         """Return (cex_name, spread_bps_8h) for the venue with widest |spread vs HL|."""
@@ -60,6 +70,10 @@ class FundingSnapshot:
         ]
         if self.bybit_funding_8h_bps is not None:
             candidates.append(("bybit", self.hl_funding_8h_bps - self.bybit_funding_8h_bps))
+        if self.drift_funding_8h_bps is not None:
+            candidates.append(("drift", self.hl_funding_8h_bps - self.drift_funding_8h_bps))
+        if self.paradex_funding_8h_bps is not None:
+            candidates.append(("paradex", self.hl_funding_8h_bps - self.paradex_funding_8h_bps))
         return max(candidates, key=lambda c: abs(c[1]))
 
 
@@ -147,6 +161,90 @@ def fetch_bybit_funding() -> dict[str, tuple[float, float]]:
     return out
 
 
+def fetch_drift_funding() -> dict[str, tuple[float, float]]:
+    """Return {asset: (funding_8h_bps, mark_px)} for Drift perps.
+
+    Drift accrues funding continuously on-chain; `rateHistory` returns the most
+    recent per-hour funding observation per market. We pull one record per
+    asset we care about and project to bps/8h to compare apples-to-apples
+    against HL/Binance/Bybit's 8h-settled rates.
+    """
+    out: dict[str, tuple[float, float]] = {}
+    for asset in ASSETS:
+        idx = DRIFT_MARKET_INDEX.get(asset)
+        if idx is None:
+            continue
+        try:
+            r = requests.get(DRIFT_RATE_HISTORY_URL, params={"marketIndex": idx}, timeout=10)
+            r.raise_for_status()
+            payload = r.json()
+        except Exception:
+            continue
+        # API may return either a bare list or a {data: [...]} / {records: [...]} wrapper.
+        records = payload if isinstance(payload, list) else (
+            payload.get("data") or payload.get("records") or payload.get("rateHistory") or []
+        )
+        if not records:
+            continue
+        # Latest first or last? Sort by ts desc if `ts` exists, else take last.
+        try:
+            latest = max(records, key=lambda r: float(r.get("ts", 0)))
+        except (TypeError, ValueError):
+            latest = records[-1]
+        try:
+            # Why: per Drift docs/glossary, `fundingRate` is scaled by 1e9 and
+            # `oraclePriceTwap` by 1e6; the funding-rate fraction per hour is
+            # (fundingRate / 1e9) / (oraclePriceTwap / 1e6). Multiply by 8 for
+            # an 8h projection, then by 10_000 for bps. Field paths:
+            # records[*].fundingRate, records[*].oraclePriceTwap.
+            funding_raw = float(latest["fundingRate"])
+            oracle_raw = float(latest["oraclePriceTwap"])
+            if oracle_raw == 0:
+                continue
+            funding_per_hour = (funding_raw / 1e9) / (oracle_raw / 1e6)
+            funding_bps_8h = funding_per_hour * 8 * 10_000
+            mark = oracle_raw / 1e6
+        except (KeyError, ValueError, TypeError):
+            continue
+        out[asset] = (funding_bps_8h, mark)
+    return out
+
+
+def fetch_paradex_funding() -> dict[str, tuple[float, float]]:
+    """Return {asset: (funding_8h_bps, mark_px)} for Paradex perps.
+
+    Backup cross-DEX venue alongside Drift. Paradex's data.api egress is
+    open from most regions where Drift's `data.api.drift.trade` is
+    CloudFront-restricted.
+    """
+    out: dict[str, tuple[float, float]] = {}
+    for asset in ASSETS:
+        sym = PARADEX_SYMBOL.get(asset)
+        if sym is None:
+            continue
+        try:
+            r = requests.get(PARADEX_MARKETS_SUMMARY_URL, params={"market": sym}, timeout=10)
+            r.raise_for_status()
+            payload = r.json()
+        except Exception:
+            continue
+        results = payload.get("results") if isinstance(payload, dict) else None
+        if not results:
+            continue
+        rec = results[0]
+        try:
+            # Why: Paradex accrues funding per-second from a premium index; the
+            # `funding_rate` field returned by /markets/summary is the current
+            # hourly rate as a decimal. *8 for 8h projection, *10_000 for bps.
+            # If real values look 8× too large vs Binance/Bybit, drop the *8.
+            funding_raw = float(rec["funding_rate"])
+            mark = float(rec["mark_price"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        out[asset] = (funding_raw * 8 * 10_000, mark)
+    return out
+
+
 def paper_pnl_net(spread_bps_8h: float, notional: float) -> tuple[float, float, float]:
     """Return (gross_pnl_8h, est_costs_8h, net_pnl_8h) on a delta-neutral pair.
 
@@ -163,6 +261,8 @@ def poll_once() -> list[FundingSnapshot]:
     hl = fetch_hl_funding()
     bn = fetch_binance_funding()
     by = fetch_bybit_funding()
+    dr = fetch_drift_funding()
+    px = fetch_paradex_funding()
     snaps: list[FundingSnapshot] = []
     for asset in ASSETS:
         if asset not in hl or asset not in bn:
@@ -175,6 +275,10 @@ def poll_once() -> list[FundingSnapshot]:
             binance_mark=bn[asset][1],
             bybit_funding_8h_bps=by[asset][0] if asset in by else None,
             bybit_mark=by[asset][1] if asset in by else None,
+            drift_funding_8h_bps=dr[asset][0] if asset in dr else None,
+            drift_mark=dr[asset][1] if asset in dr else None,
+            paradex_funding_8h_bps=px[asset][0] if asset in px else None,
+            paradex_mark=px[asset][1] if asset in px else None,
         ))
     return snaps
 
@@ -186,6 +290,10 @@ def main() -> None:
         "poll_interval_s": POLL_INTERVAL_S,
         "opportunity_bps_8h": OPP_BPS_8H,
         "paper_notional_usdc": PAPER_NOTIONAL,
+        "venues": ["hyperliquid", "binance", "bybit", "drift", "paradex"],
+        "drift_markets": {a: i for a, i in DRIFT_MARKET_INDEX.items() if a in ASSETS},
+        "paradex_markets": {a: s for a, s in PARADEX_SYMBOL.items() if a in ASSETS},
+        "note": "drift + paradex included as cross venues; both polled per market and projected to bps/8h",
     })
 
     running = True
@@ -217,11 +325,19 @@ def main() -> None:
                 "bybit_funding_8h_bps": (
                     round(s.bybit_funding_8h_bps, 3) if s.bybit_funding_8h_bps is not None else None
                 ),
+                "drift_funding_8h_bps": (
+                    round(s.drift_funding_8h_bps, 3) if s.drift_funding_8h_bps is not None else None
+                ),
+                "paradex_funding_8h_bps": (
+                    round(s.paradex_funding_8h_bps, 3) if s.paradex_funding_8h_bps is not None else None
+                ),
                 "best_cex": cex_name,
                 "best_spread_bps_8h": round(spread_bps_8h, 3),
                 "hl_mark": s.hl_mark,
                 "binance_mark": s.binance_mark,
                 "bybit_mark": s.bybit_mark,
+                "drift_mark": s.drift_mark,
+                "paradex_mark": s.paradex_mark,
                 "basis_pct_vs_binance": round((s.hl_mark - s.binance_mark) / s.binance_mark * 100, 4),
             })
             if abs(spread_bps_8h) >= OPP_BPS_8H:

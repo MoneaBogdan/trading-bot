@@ -17,6 +17,10 @@
 #                showed edge concentrates in that bucket (see
 #                reports/STRATEGY_FINDINGS.md). eth-5m-wide refocused to
 #                [0.75, 0.90] to gather more data on the tail bucket.
+#   2026-06-18 → added 15-min BTC/ETH/SOL dry-run variants. Mirroring
+#                observed wallet 0x8dxd that profitably ran the same
+#                strategy on 15-min markets. Same thresholds/band as 5m;
+#                will tune after we see real fires.
 
 x-image: &image
   build:
@@ -44,6 +48,7 @@ services:
       REQUIRE_CONFIRM: "1"
       SWEET_LO: "0.60"
       SWEET_HI: "0.75"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
 
   trader-eth-5m:
     <<: *image
@@ -56,6 +61,7 @@ services:
       REQUIRE_CONFIRM: "1"
       SWEET_LO: "0.60"
       SWEET_HI: "0.75"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
 
   trader-sol-5m:
     <<: *image
@@ -68,6 +74,7 @@ services:
       REQUIRE_CONFIRM: "1"
       SWEET_LO: "0.60"
       SWEET_HI: "0.75"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
 
   # Tail-bucket probe — ETH 5m with band [0.75, 0.90]. The 2026-06-17 backtest
   # showed mixed signals above 0.75 (some buckets profitable, some not). This
@@ -84,7 +91,51 @@ services:
       REQUIRE_CONFIRM: "1"
       SWEET_LO: "0.75"
       SWEET_HI: "0.90"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
       VARIANT_SUFFIX: "wide"
+
+  # --- 15-minute markets (Chainlink-aggregate resolution → keep Coinbase confirm) ---
+  # Why: mirroring wallet 0x8dxd, observed running this same strategy
+  # profitably on 15-min slots. Dry-run while we collect data.
+
+  trader-btc-15m:
+    <<: *image
+    container_name: polymarket-trader-btc-15m
+    command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: BTC
+      TIMEFRAME_MIN: "15"
+      THRESHOLD: "0.10"
+      REQUIRE_CONFIRM: "1"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
+
+  trader-eth-15m:
+    <<: *image
+    container_name: polymarket-trader-eth-15m
+    command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: ETH
+      TIMEFRAME_MIN: "15"
+      THRESHOLD: "0.13"
+      REQUIRE_CONFIRM: "1"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
+
+  trader-sol-15m:
+    <<: *image
+    container_name: polymarket-trader-sol-15m
+    command: ["bash", "run_live.sh"]
+    environment:
+      ASSET: SOL
+      TIMEFRAME_MIN: "15"
+      THRESHOLD: "0.20"
+      REQUIRE_CONFIRM: "1"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
 
   # --- Hourly markets (Binance-only resolution → Coinbase confirm disabled) ---
   # Note: hourly bots are largely idle (95%+ no_market_in_window skips). The
@@ -101,6 +152,7 @@ services:
       REQUIRE_CONFIRM: "0"
       SWEET_LO: "0.60"
       SWEET_HI: "0.75"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
 
   trader-eth-1h:
     <<: *image
@@ -113,6 +165,7 @@ services:
       REQUIRE_CONFIRM: "0"
       SWEET_LO: "0.60"
       SWEET_HI: "0.75"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
 
   trader-sol-1h:
     <<: *image
@@ -125,6 +178,7 @@ services:
       REQUIRE_CONFIRM: "0"
       SWEET_LO: "0.60"
       SWEET_HI: "0.75"
+      POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
 
   # --- WS recorder: shared, captures orderbook for retroactive validation ---
 

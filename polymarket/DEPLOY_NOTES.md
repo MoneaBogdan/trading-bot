@@ -134,3 +134,40 @@ docker compose ps              # verify 7 services Up
 ```
 
 Existing `polymarket/logs/live_<date>.{log,jsonl}` files are on the bind mount — they survive the rebuild untouched. The new BTC-5m container will continue appending to the same `live_<date>.{log,jsonl}` filenames (legacy name preserved). New variants will get their own tagged files.
+
+## 2026-06-18 — 15m variants + WS cache
+
+### New 15-min trader services
+
+Three new services mirror `0x8dxd`'s 15-min universe: `trader-btc-15m`, `trader-eth-15m`, `trader-sol-15m`. Same image, same `env_file`, same thresholds as the 5m variants. Sweet band `[0.60, 0.75]`. Deploy:
+
+```bash
+cd ~/trading-bot
+git pull
+docker compose build
+docker compose up -d trader-btc-15m trader-eth-15m trader-sol-15m
+docker compose ps
+```
+
+Logs land at `polymarket/logs/live_btc-15m_YYYYMMDD.jsonl` (and `eth-15m`, `sol-15m`). Phase B new-schema: `polymarket/logs/bot=btc-15m/YYYY-MM-DD.jsonl`.
+
+### WS orderbook cache feature flag
+
+All trader services in `docker-compose.yml` now read `POLY_BOOK_WS_CACHE` from the shell (default `false`). When enabled the bot subscribes to the Polymarket CLOB WS for active-window markets and serves top-of-book from cache; on cache miss or staleness >5s it falls back to HTTPS.
+
+Enable on one variant only for shadow comparison:
+
+```bash
+POLY_BOOK_WS_CACHE=true docker compose up -d trader-eth-5m
+```
+
+Compare the `book_source` field in the JSONL (`ws_cache` vs `https`) for a few hours before flipping production-wide.
+
+### Latency telemetry
+
+Every fire event now carries `lat_ms_decide`, `lat_ms_book`, `lat_ms_order`. Use `lat_ms_book` to verify the WS cache is reducing book-fetch latency — expect sub-ms on cache hits vs 50–150ms on HTTPS.
+
+### `place_buy_fok` non-blocking
+
+The order POST now runs in a thread executor so the WS price stream doesn't stall on order submission. No deploy action required — automatically active on rebuild.
+

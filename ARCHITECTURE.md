@@ -59,12 +59,13 @@ Design priorities, in order:
 ```
 trading-bot/
 ├── Dockerfile                  # single image, used by all containers
-├── docker-compose.yml          # 6 trader variants + 1 ws-recorder (after Phase 1)
+├── docker-compose.yml          # 9 trader variants (3 assets × {5m,15m,1h} + eth-5m-wide) + funding-monitor + ws-recorder
 ├── deploy.sh                   # cron-friendly auto-pull-and-rebuild script
 ├── README.md                   # user-facing setup & ops guide
 ├── RESEARCH_2026.md            # cited research + iterative follow-up log
 ├── ARCHITECTURE.md             # this file
 ├── polymarket/                 # live bot + Polymarket-specific replay backtest
+├── hyperliquid/                # funding_monitor — Hyperliquid / Binance / Bybit / Drift / Paradex cross-DEX rate poller
 ├── backtest/                   # GENERIC bar-event backtest engine (forex/equity)
 └── regime-classifier/          # standalone Claude-based regime classifier (not integrated)
 ```
@@ -76,7 +77,8 @@ polymarket/
 ├── binance_stream.py           # WS stream — Binance trades (asset-parameterized)
 ├── coinbase_stream.py          # WS stream — Coinbase matches (asset-parameterized)
 ├── gamma.py                    # Polymarket Gamma API client — market discovery
-├── clob.py                     # Polymarket CLOB orderbook fetch
+├── clob.py                     # Polymarket CLOB orderbook fetch (keep-alive httpx.Client)
+├── orderbook_ws_cache.py       # Optional WS-fed top-of-book cache (POLY_BOOK_WS_CACHE=true); HTTPS fallback on miss/stale
 ├── trader.py                   # Order placement (live/dry, daily caps)
 ├── monitor.py                  # MoveTracker (60s rolling return), _pick_market
 ├── live_trader.py              # Live entry point: stream → signal → gates → fire
@@ -93,6 +95,10 @@ polymarket/
 ├── backtest/                   # Polymarket-specific replay engine + market data cache
 └── logs/                       # All runtime logs (not in git)
 ```
+
+### `hyperliquid/` — cross-DEX funding-rate monitor
+
+`funding_monitor.py` polls Hyperliquid, Binance, Bybit, Drift (`data.api.drift.trade/rateHistory`, public), and Paradex (`api.prod.paradex.trade/v1/markets/summary`, public) for the BTC/ETH/SOL perp funding rates and fires opportunity events when the widest pair-wise spread exceeds the threshold (currently 5 bps). Each `snapshot` event carries `drift_funding_8h_bps` and `paradex_funding_8h_bps` alongside the HL/Binance/Bybit values; `best_cross()` picks the widest pair. Drift may 403 from some egresses (CloudFront geo-restriction); the parser silently zeros out a failed venue so the remaining venues keep polling.
 
 ### `backtest/` — generic engine (forex/equity legacy)
 
@@ -873,6 +879,9 @@ Event-specific fields:
   "order_ok": true,
   "order_id": "0x...",
   "dry_run": false,
+  "lat_ms_decide": 0.4,
+  "lat_ms_book": 118,
+  "lat_ms_order": 174,
   "debug": { "ret_60s_pct": -0.137, "cb_ret_60s_pct": -0.121, "window_ret_pct": -0.18, "underlying_price": 67161.88 }
 }
 
@@ -1369,7 +1378,7 @@ The live bot must keep running. Each phase is a non-breaking commit; nothing is 
 
 ### Phase B.7 — Operational tooling for ongoing tuning ✅ (commit `a7b074c`)
 - `polymarket/backtest/sweet_band_counterfactual.py` — replays `ask_outside_sweet_band` skip rows against Polymarket gamma resolutions to size widened-band PnL. Surfaced the [0.60, 0.75] edge bucket on 2026-06-17 (n=282 resolved signals, 77% direction accuracy overall, +$61 in that band).
-- `polymarket/backtest/daily_report.py` — generates `reports/<YYYY-MM-DD>.md` per UTC date with per-bot stats, configs (extracted from boot events), market context (Polymarket UP/DOWN resolution skew), news-recorder summary, and auto-derived **direction** + **risks** sections. `--push` flag commits + pushes.
+- `polymarket/backtest/daily_report.py` — generates `reports/<YYYY-MM-DD>.md` per UTC date with per-bot stats, configs (extracted from boot events), market context (Polymarket UP/DOWN resolution skew, bucketed separately for 5m and 15m markets), news-recorder summary, and auto-derived **direction** + **risks** sections. Tolerates gamma's HTTP 422 at offset ≥ 2100. `--push` flag commits + pushes.
 - `reports/STRATEGY_FINDINGS.md` — running curated log of evidence-based findings so we don't relearn the same lessons. Daily reports under `reports/<date>.md` are kept in git.
 - Sweet-band v2 applied: all 6 main variants → `[0.60, 0.75]`; `trader-eth-5m-wide` refocused to `[0.75, 0.90]` as a tail-bucket probe.
 
@@ -1818,7 +1827,9 @@ For the latency-arb strategy specifically, we care about end-to-end latency from
 | Place FOK → ack | <300ms | ~180ms |
 | **Total** | **<550ms** | **~330ms** |
 
-We log `latency_ms` per fire event so this is observable. Drift > 50% over a week triggers an investigation. The strategy itself has no latency budget (pure data); the budget is on the framework.
+Every fire row carries `lat_ms_decide`, `lat_ms_book`, and `lat_ms_order` measuring wall-clock from Binance tick → orderbook resolve → CLOB POST ack, so each hop is observable. Drift > 50% over a week triggers an investigation. The strategy itself has no latency budget (pure data); the budget is on the framework.
+
+Two executor-side optimizations keep the hot path tight: `polymarket/clob.py` uses a module-level `httpx.Client` with keep-alive (max 4 connections) so each `get_orderbook` skips the TCP+TLS handshake, and `place_buy_fok` is dispatched via `run_in_executor` so the sign+POST cycle does not stall the Binance price stream. When `POLY_BOOK_WS_CACHE=true`, `polymarket/orderbook_ws_cache.py` subscribes to the active-window markets' token_ids on the Polymarket CLOB WS and serves top-of-book from memory, falling back to the HTTPS path on cache miss or a snapshot older than 5 s.
 
 ---
 

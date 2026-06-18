@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from collections import deque
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -37,9 +38,16 @@ from clob import get_orderbook  # noqa: E402
 from coinbase_stream import stream_trades as stream_coinbase_trades  # noqa: E402
 from gamma import discover_markets  # noqa: E402
 from monitor import MoveTracker, _pick_market  # noqa: E402
+from orderbook_ws_cache import OrderbookCache  # noqa: E402
 from trader import trader_from_env  # noqa: E402
 from src.core.logger import BotLogger  # noqa: E402
 from uuid import uuid4  # noqa: E402
+
+
+def _book_ws_cache_enabled() -> bool:
+    return os.environ.get("POLY_BOOK_WS_CACHE", "false").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 
 class PriceHistory:
@@ -100,7 +108,8 @@ async def _watchdog(hb: dict, stale_s: float, require_confirm: bool) -> None:
 
 
 async def _refresh_markets(state: dict, asset: str, timeframe_min: int,
-                           interval_s: float = 60.0) -> None:
+                           interval_s: float = 60.0,
+                           book_cache: OrderbookCache | None = None) -> None:
     """Background loop: refresh upcoming markets every interval_s."""
     horizon_min = max(10, timeframe_min * 2)
     while True:
@@ -111,6 +120,14 @@ async def _refresh_markets(state: dict, asset: str, timeframe_min: int,
             )
             state["markets"] = mks
             state["markets_updated"] = datetime.now(timezone.utc)
+            if book_cache is not None:
+                tokens: set[str] = set()
+                for mk in mks:
+                    if getattr(mk, "up_token_id", None):
+                        tokens.add(mk.up_token_id)
+                    if getattr(mk, "down_token_id", None):
+                        tokens.add(mk.down_token_id)
+                book_cache.update_subscriptions(tokens)
         except Exception as e:
             print(f"[markets] refresh error: {e}", flush=True)
         await asyncio.sleep(interval_s)
@@ -136,6 +153,7 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
           f"require_confirm={require_confirm}  "
           f"snipe_window={snipe_window_s}s  "
           f"require_window_anchor={require_window_anchor}", flush=True)
+    book_ws_cache_enabled = _book_ws_cache_enabled()
     bot_logger.boot(
         asset=asset, timeframe_min=timeframe_min, threshold_pct=threshold_pct,
         cooldown_s=cooldown_s, sweet_lo=sweet_lo, sweet_hi=sweet_hi,
@@ -144,10 +162,18 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         dry_run=trader.config.dry_run,
         max_order_usdc=trader.config.max_order_usdc,
         max_daily_usdc=trader.config.max_daily_usdc,
+        book_ws_cache_enabled=book_ws_cache_enabled,
     )
+    print(f"[book-cache] enabled={book_ws_cache_enabled}", flush=True)
+
+    book_cache: OrderbookCache | None = None
+    if book_ws_cache_enabled:
+        book_cache = OrderbookCache()
+        book_cache.start()
 
     state: dict = {"markets": [], "markets_updated": None}
-    asyncio.create_task(_refresh_markets(state, asset, timeframe_min))
+    asyncio.create_task(_refresh_markets(state, asset, timeframe_min,
+                                        book_cache=book_cache))
 
     tracker = MoveTracker(window_seconds=60.0)
     cb_tracker = MoveTracker(window_seconds=60.0)
@@ -160,6 +186,7 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
     last_signal_ts: datetime | None = None
 
     async for trade in stream_trades(asset):
+        t0 = time.monotonic()
         tracker.add(trade)
         history.add(trade)
         hb["binance"] = datetime.now(timezone.utc)
@@ -215,7 +242,24 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         target_token = market.up_token_id if direction == "Up" else market.down_token_id
 
         loop = asyncio.get_running_loop()
-        ob = await loop.run_in_executor(None, get_orderbook, target_token)
+        t1 = time.monotonic()
+        book_source = "https"
+        ob = None
+        if book_cache is not None:
+            cached = book_cache.get(target_token)
+            if cached is not None and book_cache.is_fresh(target_token):
+                ob = cached
+                book_source = "ws_cache"
+            else:
+                miss_reason = "book_cache_miss" if cached is None else "book_cache_stale"
+                age_ms = (round((time.time() - cached.updated_ts) * 1000, 1)
+                          if cached is not None else None)
+                print(f"[book-cache] fallback reason={miss_reason} "
+                      f"token={target_token[:12]} age_ms={age_ms}", flush=True)
+                book_source = miss_reason
+        if ob is None:
+            ob = await loop.run_in_executor(None, get_orderbook, target_token)
+        t2 = time.monotonic()
         ask = ob.best_ask
         if ask is None:
             print(f"[skip] no ask on {direction} side for {market.title[:50]}", flush=True)
@@ -237,7 +281,13 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         # Place order
         size_usdc = trader.config.max_order_usdc
         intent_id = str(uuid4())
-        result = trader.place_buy_fok(target_token, ask, size_usdc)
+        result = await loop.run_in_executor(
+            None, trader.place_buy_fok, target_token, ask, size_usdc
+        )
+        t3 = time.monotonic()
+        lat_ms_decide = round((t1 - t0) * 1000, 1)
+        lat_ms_book = round((t2 - t1) * 1000, 1)
+        lat_ms_order = round((t3 - t2) * 1000, 1)
         record = {
             "type": "trade",
             "ts": trade.ts.isoformat(),
@@ -260,6 +310,10 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
             "filled_price": result.filled_price,
             "error": result.error,
             "dry_run": trader.config.dry_run,
+            "lat_ms_decide": lat_ms_decide,
+            "lat_ms_book": lat_ms_book,
+            "lat_ms_order": lat_ms_order,
+            "book_source": book_source,
         }
         _log(log_path, record)
         cost = (result.filled_size * result.filled_price) if (
@@ -274,6 +328,8 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
             dry_run=trader.config.dry_run,
             ret_60s_pct=ret, underlying_price=trade.price,
             error=result.error,
+            lat_ms_decide=lat_ms_decide, lat_ms_book=lat_ms_book,
+            lat_ms_order=lat_ms_order, book_source=book_source,
         )
         status = "DRY" if trader.config.dry_run else ("OK" if result.ok else "FAIL")
         print(f"[ORDER {status}] {trade.ts.strftime('%H:%M:%S')}  ret={ret:+.3f}%  "

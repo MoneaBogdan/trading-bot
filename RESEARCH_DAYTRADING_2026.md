@@ -218,4 +218,47 @@ Data combo: **NautilusTrader + Databento (CME MBO PAYG, ~$300-800 for 6mo ES+CL+
 4. ~~FX sweep-reversal~~ — defer until #2 ships. 2-month build is too speculative vs the Topstep path's deterministic mechanics.
 5. ~~Order-flow~~ — skip unless #1 fails and we have nothing better.
 
+---
 
+## Appendix: Deep-research v2 (2026-06-18)
+
+Second-pass fan-out across web sources, adversarially verified. The headline: the Polymarket BTC/ETH/SOL short-binary latency-arb class is still the best-evidenced retail edge in mid-2026, but the window is closing, and Hyperliquid hourly funding remains the only structurally durable play. Everything else is either refuted, paywalled, or unevidenced.
+
+### Verified strategies (still working mid-2026)
+
+- **Polymarket BTC/ETH/SOL short-binary latency arb.** Comparator wallet `0x8dxd` turned $313 into ~$437k in one month at 98% win rate over 6,615 trades. Window compression is real: ~12.3s of stale-price arb in 2024 → ~2.7s in 2026. ~73% of profits now go to sub-100ms bots, and Polymarket has deployed dynamic taker fees targeting this class. Edge is alive but durability beyond 6–12 months is uncertain — treat it as a fast-decaying opportunity, not a moat.
+- **Hyperliquid hourly funding vs CEX 8h.** Structural and durable. 0.01%/8h fixed interest floor (~11.6% APR base) plus 4%/hr cap on the variable component. Unchanged since v1; still the right phase-2 build target.
+- **Polymarket maker rebates.** 25% on Sports / Politics / Finance / Weather, 20% on Crypto, paid daily in pUSD, $1 minimum payout, no volume floor. Open to any wallet, no application.
+- **Loris Tools.** Normalizes funding across 14 perp DEXes but gates everything behind signup — falls outside the no-account constraint, so we built our own Drift + Paradex pollers instead.
+
+### Refuted claims (do NOT pursue)
+
+- "Kalshi↔Polymarket 1–5% typical spreads" — verified 0-for-3 against sources.
+- "Kalshi fee tiers 7% / 5% / 3% / 1%" — verified 0-for-3.
+- "$271k single-bot 30-day exploit" (predik.io) — verified 0-for-3, likely fabricated.
+- "Hyperliquid 0.015% maker / 0.045% taker tiers" (eco.com) — verified 0-for-3. Pull the live fee schedule before sizing anything funding-related.
+
+### Adjacent plays — research gaps, not graveyards
+
+No public PnL evidence surfaced, but the structural setup is plausible. Worth a paper test, not a commit:
+
+- Polymarket sports / politics / weather binaries — no latency-arb evidence found in v2.
+- Kalshi↔Polymarket arb — four OSS repos exist, none publish PnL. ImMike explicitly calls the opportunity "rare and fleeting."
+- Prediction-market vs sportsbook implied-prob arb.
+
+### Fade list (well-documented but uneconomic for us)
+
+- **HyperEVM HYPE/USDT0 ↔ Hyperliquid HYPE/USDC arb.** The two-brother $5M case from Q1 2026 is well-documented but now crowded post-publication: requires 100+ wallets, sub-2s execution, ~$1.2M gas budget. Capital-out-of-reach, not edge-dead.
+- Generic CEX grid bots, BTC/ETH stat-arb pairs, vanilla Binance MM.
+
+### Concrete next steps (v2 top-3)
+
+1. **Polymarket maker-rebate quoter on Sports / Politics.** New build. 25% rebate, daily payout, no volume floor — fits the no-account constraint and runs on existing CLOB infrastructure.
+2. **Cross-DEX funding extension to the HL monitor.** Loris was paywalled, so v2 shipped Drift + Paradex pollers instead. Paradex live-test on 2026-06-18 surfaced first opportunity events: −6.9 bps ETH and −7.4 bps SOL, both above the 5 bps fire threshold. Net PnL is negative under 1-cycle cost amortization but works out to ~73% APR if held 30 days. **Paradex funding-rate unit is UNVERIFIED — confirm before sizing.**
+3. **Scale the Polymarket bot + add 15-min markets.** Mirrors `0x8dxd`'s universe. Deployed today (2026-06-18) as three new dry-run variants — see `polymarket/DEPLOY_NOTES.md`.
+
+### Open questions v2 did NOT answer
+
+- Widest persistent funding spread among Drift / Lighter / Paradex / Aster vs HL on a 30-day window.
+- Whether Polymarket sports / politics shows the same price-lag the BTC/ETH/SOL bot exploits.
+- Post-dynamic-fee maker-rebate net yield with $1k–$10k inventory on thin politics markets.

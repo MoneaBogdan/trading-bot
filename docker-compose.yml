@@ -132,3 +132,21 @@ services:
     <<: *image
     container_name: polymarket-ws-recorder
     command: ["bash", "run_ws_recorder.sh"]
+
+  # --- Hyperliquid funding-arb monitor (phase 1: paper-PnL only) ---
+  # Public REST polls only — no secrets, no execution. Logs to hyperliquid/logs/.
+  # Goal: ≥7 days of paper-PnL on BTC/ETH/SOL to verify the 3–12% APR claim
+  # survives real spreads + modeled slippage. See hyperliquid/README.md.
+  hyperliquid-monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polymarket-bot:latest
+    restart: unless-stopped
+    container_name: hyperliquid-monitor
+    working_dir: /app/hyperliquid
+    command: ["python3", "funding_monitor.py"]
+    env_file:
+      - ./hyperliquid/.env
+    volumes:
+      - ./hyperliquid/logs:/app/hyperliquid/logs

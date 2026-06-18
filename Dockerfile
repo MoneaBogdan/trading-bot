@@ -12,7 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY polymarket/requirements.txt /app/polymarket/requirements.txt
-RUN pip install --upgrade pip && pip install -r /app/polymarket/requirements.txt
+COPY hyperliquid/requirements.txt /app/hyperliquid/requirements.txt
+RUN pip install --upgrade pip \
+    && pip install -r /app/polymarket/requirements.txt \
+    && pip install -r /app/hyperliquid/requirements.txt
 
 COPY . /app
 

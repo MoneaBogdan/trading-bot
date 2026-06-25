@@ -450,7 +450,8 @@ def _render(date: str, data: dict[str, list[dict[str, Any]]],
             resolutions: dict[str, str],
             most_recent_boots: dict[str, dict[str, Any] | None],
             market_ctx: dict[str, Any],
-            news_ctx: dict[str, Any]) -> str:
+            news_ctx: dict[str, Any],
+            logs_dir: Path | None = None) -> str:
     lines: list[str] = []
     lines.append(f"# Daily report — {date}\n")
     lines.append(f"Generated {datetime.now(timezone.utc).isoformat(timespec='seconds')}.\n")
@@ -603,6 +604,17 @@ def _render(date: str, data: dict[str, list[dict[str, Any]]],
         lines.append("_(news recorder not running or no headlines logged today)_")
     lines.append("")
 
+    # ---- Cumulative since each bot's first fire (anchored to this report's date) ----
+    if logs_dir is not None:
+        try:
+            from polymarket.backtest.cumulative_report import build_cumulative_markdown
+            lines.append(build_cumulative_markdown(logs_dir, asof_date=date))
+        except Exception as e:
+            lines.append("## Cumulative since each bot's first fire")
+            lines.append("")
+            lines.append(f"_(failed: {type(e).__name__}: {e})_")
+            lines.append("")
+
     # ---- Manual notes scaffold ----
     lines.append("## Notes (manual append)")
     lines.append("")
@@ -679,7 +691,7 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{date}.md"
     out_path.write_text(_render(date, data, resolutions, most_recent_boots,
-                                market_ctx, news_ctx))
+                                market_ctx, news_ctx, logs_dir=logs_dir))
     print(f"[daily_report] wrote {out_path}")
 
     if args.push:

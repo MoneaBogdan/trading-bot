@@ -17,10 +17,11 @@ sweet-spot price band.
 | `trader-{btc,eth,sol}-15m` | Same loop on Polymarket's 15-minute markets. Same thresholds and band as the 5m variants; Coinbase confirm on. |
 | `trader-{btc,eth,sol}-1h` | Same loop on 1-hour markets; confirm gate off. |
 | `trader-eth-5m-wide` | Tail-bucket probe on `[0.75, 0.90]`. |
-| `funding-monitor` | Polls Hyperliquid, Binance, Bybit, Drift, and Paradex for funding-rate dislocations and logs cross-DEX opportunity events. |
+| `hyperliquid-monitor` | Polls Hyperliquid, Binance, Bybit, Drift, and Paradex for funding-rate dislocations and logs cross-DEX opportunity events. |
 | `ws-recorder` | Logs full Polymarket L2 orderbook events for post-hoc fill validation and backtest alignment. |
+| `control-center` | Read-only sidecar (auth'd web UI on `127.0.0.1:8080`) that indexes bot + funding JSONL into SQLite. No credentials, no execution. See `control-center/README.md`. |
 
-All run from the same image, restart unless stopped, and share `polymarket/logs/` on the host.
+All run from the same image, restart unless stopped, and share `polymarket/logs/` on the host. Total: 12 services (10 traders + ws-recorder + hyperliquid-monitor + control-center).
 
 ## Prerequisites
 
@@ -56,11 +57,33 @@ The address it prints must match the wallet you funded. If it doesn't, re-check
 ## Run
 
 ```bash
-docker compose up -d                          # start both services
-docker compose logs -f trader                 # tail the trader
+docker compose up -d                          # start all services (12 containers)
+docker compose ps                             # check status
+docker compose logs -f trader-eth-5m          # tail one trader
 docker compose logs -f ws-recorder            # tail the orderbook recorder
-docker compose down                           # stop both
+docker compose logs -f hyperliquid-monitor    # tail the funding monitor
+docker compose down                           # stop everything
 ```
+
+### Optional: Control Center web UI
+
+The `control-center` service exposes a read-only ops UI bound to localhost:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 root@<host>
+# then open http://127.0.0.1:8080
+```
+
+Credentials come from the root `.env` file (gitignored):
+
+```dotenv
+CONTROL_CENTER_USER=admin
+CONTROL_CENTER_PASSWORD=<set-something-real>     # default "change-me" is publicly known
+CONTROL_CENTER_BIND=127.0.0.1                    # bind iface; leave on localhost
+CONTROL_CENTER_SYNC_INTERVAL_S=30
+```
+
+Logs are mounted read-only; the sidecar cannot place or cancel orders.
 
 JSONL trade records and stdout logs land in `polymarket/logs/` on the host
 (persistent across container restarts).
@@ -317,7 +340,7 @@ When you need to analyze on another machine, copy the dir manually (rsync, scp, 
 ```
 polymarket/
   trader.py                  # Polymarket order placement (v2 SDK)
-  live_trader.py             # main loop: signal → confirm → fill
+  live_trader.py             # thin runner: streams + market discovery + execution; calls into src/strategies
   binance_stream.py          # Binance BTC trades WS
   coinbase_stream.py         # Coinbase BTC-USD WS (confirmation gate)
   gamma.py                   # Polymarket market discovery
@@ -327,7 +350,14 @@ polymarket/
   setup_wallet.py            # derives API creds from your private key
   run_live.sh                # auto-restart wrapper used by `trader` service
   backtest/                  # tick-aligned replay tools (replay_tick.py, analyze_tick.py)
-  logs/                      # *.jsonl + *.log written by both services
+  logs/                      # *.jsonl + *.log written by trader + recorder services
+src/
+  core/                      # framework: stream_bus, bot runtime, supervisor, BotLogger
+  strategies/                # pure decision logic (polymarket_latency_arb.py)
+  recorders/                 # shared recorder helpers
+control-center/              # read-only fleet observability sidecar (auth'd web UI + SQLite)
+hyperliquid/                 # funding-monitor (HL/Binance/Bybit/Drift/Paradex)
+tests/                       # unit tests for strategies, bus, supervisor, shim
 backtest/                    # generic backtest framework (other strategies)
 regime-classifier/           # unrelated sub-project
 ```

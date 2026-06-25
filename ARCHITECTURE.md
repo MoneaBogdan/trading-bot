@@ -59,13 +59,16 @@ Design priorities, in order:
 ```
 trading-bot/
 ├── Dockerfile                  # single image, used by all containers
-├── docker-compose.yml          # 9 trader variants (3 assets × {5m,15m,1h} + eth-5m-wide) + funding-monitor + ws-recorder
+├── docker-compose.yml          # 10 trader variants (3 assets × {5m,15m,1h} + eth-5m-wide) + ws-recorder + hyperliquid-monitor + control-center
 ├── deploy.sh                   # cron-friendly auto-pull-and-rebuild script
 ├── README.md                   # user-facing setup & ops guide
 ├── RESEARCH_2026.md            # cited research + iterative follow-up log
 ├── ARCHITECTURE.md             # this file
-├── polymarket/                 # live bot + Polymarket-specific replay backtest
+├── polymarket/                 # live bot runner + Polymarket-specific replay backtest
 ├── hyperliquid/                # funding_monitor — Hyperliquid / Binance / Bybit / Drift / Paradex cross-DEX rate poller
+├── src/                        # framework: core/ (stream_bus, bot, supervisor, logger), strategies/ (polymarket_latency_arb), recorders/
+├── control-center/             # read-only fleet observability sidecar (Basic-auth HTTP UI + SQLite over bot JSONL)
+├── tests/                      # unit tests — strategy decision tree, bus policies, supervisor lifecycle, live_trader shim
 ├── backtest/                   # GENERIC bar-event backtest engine (forex/equity)
 └── regime-classifier/          # standalone Claude-based regime classifier (not integrated)
 ```
@@ -81,7 +84,7 @@ polymarket/
 ├── orderbook_ws_cache.py       # Optional WS-fed top-of-book cache (POLY_BOOK_WS_CACHE=true); HTTPS fallback on miss/stale
 ├── trader.py                   # Order placement (live/dry, daily caps)
 ├── monitor.py                  # MoveTracker (60s rolling return), _pick_market
-├── live_trader.py              # Live entry point: stream → signal → gates → fire
+├── live_trader.py              # Live runner: owns streams + market discovery + orderbook + execution; decision tree lives in src/strategies/polymarket_latency_arb.py (Phase C extraction, 2026-06-25)
 ├── run_live.sh                 # Auto-restart wrapper for live_trader
 ├── orderbook_recorder_ws.py    # Long-running WS recorder → logs/orderbook_ws_*.jsonl
 ├── orderbook_recorder.py       # Polling fallback recorder (REST)

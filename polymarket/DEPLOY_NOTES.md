@@ -34,32 +34,46 @@ Defaults live in `run_live.sh`; override via env vars. Values below are the ones
 
 ## Required secrets (NOT in repo)
 
-Set in `.env` next to `docker-compose.yml`:
+In `polymarket/.env`:
 
 - `POLY_PRIVATE_KEY` — wallet private key
 - `POLY_FUNDER_ADDRESS` — funder/proxy address
+
+In the root `.env` (next to `docker-compose.yml`) — required by the control-center sidecar:
+
+- `CONTROL_CENTER_USER` — Basic-auth username (default `admin`)
+- `CONTROL_CENTER_PASSWORD` — **must set**; the default `change-me` is publicly known
+- `CONTROL_CENTER_BIND` — interface to bind (default `127.0.0.1`; leave on localhost and tunnel via SSH)
+- `CONTROL_CENTER_SYNC_INTERVAL_S` — log→SQLite resync cadence (default `30`)
 
 See `.env.example` for the full list.
 
 ## What runs together
 
-Seven long-lived processes — all supervised by docker-compose (`restart: unless-stopped`):
+Twelve long-lived processes — all supervised by docker-compose (`restart: unless-stopped`):
 
-**Six trader variants** (one per asset × timeframe — all share one image, differ only in env vars):
+**Ten trader variants** (one per asset × timeframe — all share one image, differ only in env vars):
 
 | Service | Asset | Window | Threshold | Confirm | Notes |
 |---|---|---|---|---|---|
 | `trader-btc-5m` | BTC | 5 min | 0.10% | yes | The original — Chainlink-aggregate resolution |
 | `trader-eth-5m` | ETH | 5 min | 0.13% | yes | Higher 60s vol → wider threshold |
 | `trader-sol-5m` | SOL | 5 min | 0.20% | yes | Highest 60s vol |
+| `trader-eth-5m-wide` | ETH | 5 min | 0.13% | yes | Tail-bucket probe — sweet band `[0.75, 0.90]` (A/B vs main bots on `[0.60, 0.75]`) |
+| `trader-btc-15m` | BTC | 15 min | 0.10% | yes | Mirrors wallet 0x8dxd's 15-min universe |
+| `trader-eth-15m` | ETH | 15 min | 0.13% | yes | 15-min variant |
+| `trader-sol-15m` | SOL | 15 min | 0.20% | yes | 15-min variant |
 | `trader-btc-1h` | BTC | 60 min | 0.10% | **no** | Binance-only resolution — Coinbase confirm dropped |
 | `trader-eth-1h` | ETH | 60 min | 0.13% | **no** | Binance-only resolution |
 | `trader-sol-1h` | SOL | 60 min | 0.20% | **no** | Binance-only resolution |
-| `trader-eth-5m-wide` | ETH | 5 min | 0.13% | yes | Tail-bucket probe — sweet band `[0.75, 0.90]` (A/B vs main bots on `[0.60, 0.75]`) |
 
 Each writes its own log files (see below). All run dry-run by default.
 
 **One shared WS recorder**: `polymarket-ws-recorder` runs `run_ws_recorder.sh` → `orderbook_recorder_ws.py`. Captures Polymarket L2 orderbook for retroactive fill validation and backtests. One recorder covers all variants — no need to duplicate.
+
+**One funding monitor**: `hyperliquid-monitor` polls HL/Binance/Bybit/Drift/Paradex and logs cross-venue funding-rate opportunities to `hyperliquid/logs/`. Public REST only — no secrets, no execution.
+
+**One observability sidecar**: `control-center` exposes an auth'd read-only web UI on `127.0.0.1:8080` that indexes all bot + funding JSONL into SQLite. Logs are mounted read-only; no trading credentials. SSH-tunnel for remote access: `ssh -L 8080:127.0.0.1:8080 root@<host>`.
 
 ## Logs — where everything lands
 
@@ -96,7 +110,7 @@ Quick checks after deploy:
 
 ```bash
 ls -lah polymarket/logs/                                            # all variants growing?
-docker compose ps                                                    # all 7 services Up?
+docker compose ps                                                    # all 12 services Up?
 for v in '' eth-5m_ eth-5m-wide_ sol-5m_ btc-60m_ eth-60m_ sol-60m_; do
   f="polymarket/logs/live_${v}$(date -u +%Y%m%d).jsonl"
   [ -f "$f" ] && echo "$f: $(wc -l < "$f") fires"
@@ -129,8 +143,8 @@ cd /mnt/data/trading-bot
 git pull                       # pulls multi-variant code
 docker compose down            # stops the old single trader + recorder
 docker compose build           # rebuild the shared image
-docker compose up -d           # starts all 7 containers
-docker compose ps              # verify 7 services Up
+docker compose up -d           # starts all 12 containers
+docker compose ps              # verify 12 services Up
 ```
 
 Existing `polymarket/logs/live_<date>.{log,jsonl}` files are on the bind mount — they survive the rebuild untouched. The new BTC-5m container will continue appending to the same `live_<date>.{log,jsonl}` filenames (legacy name preserved). New variants will get their own tagged files.

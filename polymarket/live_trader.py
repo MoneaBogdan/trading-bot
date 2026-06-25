@@ -25,7 +25,6 @@ import os
 import sys
 import time
 from collections import deque
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -41,6 +40,19 @@ from monitor import MoveTracker, _pick_market  # noqa: E402
 from orderbook_ws_cache import OrderbookCache  # noqa: E402
 from trader import trader_from_env  # noqa: E402
 from src.core.logger import BotLogger  # noqa: E402
+from src.strategies.polymarket_latency_arb import (  # noqa: E402
+    BookEvent,
+    BookRequest,
+    Ignore,
+    OrderIntent,
+    Params as LatencyArbParams,
+    SignalEvent,
+    Skip,
+    State as LatencyArbState,
+    decide_prebook,
+    decide_signal_gate,
+    decide_with_book,
+)
 from uuid import uuid4  # noqa: E402
 
 
@@ -183,7 +195,18 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
     if require_confirm:
         asyncio.create_task(_track_coinbase(cb_tracker, hb, asset))
     asyncio.create_task(_watchdog(hb, stale_s=90.0, require_confirm=require_confirm))
-    last_signal_ts: datetime | None = None
+    strategy_params = LatencyArbParams(
+        threshold_pct=threshold_pct,
+        cooldown_s=cooldown_s,
+        sweet_lo=sweet_lo,
+        sweet_hi=sweet_hi,
+        require_confirm=require_confirm,
+        snipe_window_s=snipe_window_s,
+        require_window_anchor=require_window_anchor,
+        asset=asset,
+        timeframe_min=timeframe_min,
+    )
+    strategy_state = LatencyArbState()
 
     async for trade in stream_trades(asset):
         t0 = time.monotonic()
@@ -191,63 +214,70 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         history.add(trade)
         hb["binance"] = datetime.now(timezone.utc)
         ret = tracker.return_pct
-        if ret is None:
+        cb_ret = cb_tracker.return_pct if require_confirm else None
+        signal_event = SignalEvent(
+            ts=trade.ts,
+            price=trade.price,
+            ret_60s_pct=ret,
+            cb_ret_60s_pct=cb_ret,
+            market=None,
+            window_open_price=None,
+        )
+        signal_gate = decide_signal_gate(strategy_state, signal_event, strategy_params)
+        if isinstance(signal_gate, Ignore):
             continue
-        if abs(ret) < threshold_pct:
-            continue
-        if last_signal_ts and (trade.ts - last_signal_ts).total_seconds() < cooldown_s:
-            continue
-
-        if require_confirm:
-            cb_ret = cb_tracker.return_pct
-            if cb_ret is None or abs(cb_ret) < threshold_pct or (cb_ret > 0) != (ret > 0):
+        if isinstance(signal_gate, Skip):
+            if signal_gate.reason == "cb_confirm_fail":
+                cb_ret = signal_gate.debug["cb_ret_60s_pct"]
                 cb_disp = "n/a" if cb_ret is None else f"{cb_ret:+.3f}%"
                 print(f"[skip] cb confirm fail  binance={ret:+.3f}% coinbase={cb_disp}", flush=True)
-                bot_logger.skip("cb_confirm_fail", ts=trade.ts,
-                                ret_60s_pct=ret, cb_ret_60s_pct=cb_ret)
-                last_signal_ts = trade.ts
-                continue
+            bot_logger.skip(signal_gate.reason, ts=trade.ts, **signal_gate.debug)
+            continue
 
         # Restrict to markets within the snipe window — the closer to close
         # the smaller the reversal risk between signal and resolution.
         market = _pick_market(state["markets"], trade.ts, max_lookahead_s=int(snipe_window_s))
-        if market is None:
-            bot_logger.skip("no_market_in_window", ts=trade.ts,
-                            ret_60s_pct=ret, snipe_window_s=snipe_window_s)
-            last_signal_ts = trade.ts  # cooldown to avoid spinning on the same move
-            continue
-
-        # Window-open anchor: the *actual* resolution question is "is the price
-        # above window-open at window-close?". Our 60s return is only a proxy.
-        # Require sign agreement so we don't fire when proxy and real question disagree.
-        # window_open = end_dt - timeframe_min*60 (gamma already filters to exact duration).
-        if require_window_anchor:
+        window_open_price = None
+        if market is not None and require_window_anchor:
             w_open = market.end_dt - timedelta(seconds=timeframe_min * 60)
-            open_price = history.price_at(w_open)
-            if open_price is None or open_price <= 0:
-                print(f"[skip] no window-open price (buffer < window start)", flush=True)
-                bot_logger.skip("no_window_open_price", ts=trade.ts,
-                                ret_60s_pct=ret, window_open_iso=w_open.isoformat())
-                last_signal_ts = trade.ts
-                continue
-            window_ret = (trade.price / open_price - 1) * 100
-            if (window_ret > 0) != (ret > 0):
-                print(f"[skip] window-anchor disagree  60s={ret:+.3f}% window={window_ret:+.3f}%", flush=True)
-                bot_logger.skip("window_anchor_disagree", ts=trade.ts,
-                                ret_60s_pct=ret, window_ret_pct=window_ret)
-                last_signal_ts = trade.ts
-                continue
+            window_open_price = history.price_at(w_open)
 
-        direction = "Up" if ret > 0 else "Down"
-        target_token = market.up_token_id if direction == "Up" else market.down_token_id
+        prebook = decide_prebook(
+            strategy_state,
+            SignalEvent(
+                ts=trade.ts,
+                price=trade.price,
+                ret_60s_pct=ret,
+                cb_ret_60s_pct=cb_ret,
+                market=market,
+                window_open_price=window_open_price,
+            ),
+            strategy_params,
+        )
+        if isinstance(prebook, Ignore):
+            continue
+        if isinstance(prebook, Skip):
+            if prebook.reason == "cb_confirm_fail":
+                cb_ret = prebook.debug["cb_ret_60s_pct"]
+                cb_disp = "n/a" if cb_ret is None else f"{cb_ret:+.3f}%"
+                print(f"[skip] cb confirm fail  binance={ret:+.3f}% coinbase={cb_disp}", flush=True)
+            elif prebook.reason == "no_window_open_price":
+                print(f"[skip] no window-open price (buffer < window start)", flush=True)
+            elif prebook.reason == "window_anchor_disagree":
+                window_ret = prebook.debug["window_ret_pct"]
+                print(f"[skip] window-anchor disagree  60s={ret:+.3f}% window={window_ret:+.3f}%", flush=True)
+            bot_logger.skip(prebook.reason, ts=trade.ts, **prebook.debug)
+            continue
+        if not isinstance(prebook, BookRequest):
+            raise TypeError(f"unexpected prebook decision {prebook!r}")
 
         loop = asyncio.get_running_loop()
         t1 = time.monotonic()
         book_source = "https"
         ob = None
         if book_cache is not None:
-            cached = book_cache.get(target_token)
-            if cached is not None and book_cache.is_fresh(target_token):
+            cached = book_cache.get(prebook.target_token)
+            if cached is not None and book_cache.is_fresh(prebook.target_token):
                 ob = cached
                 book_source = "ws_cache"
             else:
@@ -255,34 +285,40 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
                 age_ms = (round((time.time() - cached.updated_ts) * 1000, 1)
                           if cached is not None else None)
                 print(f"[book-cache] fallback reason={miss_reason} "
-                      f"token={target_token[:12]} age_ms={age_ms}", flush=True)
+                      f"token={prebook.target_token[:12]} age_ms={age_ms}", flush=True)
                 book_source = miss_reason
         if ob is None:
-            ob = await loop.run_in_executor(None, get_orderbook, target_token)
+            ob = await loop.run_in_executor(None, get_orderbook, prebook.target_token)
         t2 = time.monotonic()
-        ask = ob.best_ask
-        if ask is None:
-            print(f"[skip] no ask on {direction} side for {market.title[:50]}", flush=True)
-            bot_logger.skip("no_ask_on_side", ts=trade.ts,
-                            ret_60s_pct=ret, direction=direction,
-                            market_id=market.condition_id)
-            last_signal_ts = trade.ts
+        book_decision = decide_with_book(
+            strategy_state,
+            BookEvent(
+                ts=trade.ts,
+                ret_60s_pct=ret,
+                market=prebook.market,
+                direction=prebook.direction,
+                target_token=prebook.target_token,
+                ask=ob.best_ask,
+            ),
+            strategy_params,
+        )
+        if isinstance(book_decision, Skip):
+            if book_decision.reason == "no_ask_on_side":
+                print(f"[skip] no ask on {prebook.direction} side for {prebook.market.title[:50]}", flush=True)
+            elif book_decision.reason == "ask_outside_sweet_band":
+                ask = book_decision.debug["ask"]
+                print(f"[skip] ask {ask} outside sweet spot [{sweet_lo},{sweet_hi}]  "
+                      f"market={prebook.market.title[:50]}", flush=True)
+            bot_logger.skip(book_decision.reason, ts=trade.ts, **book_decision.debug)
             continue
-        if not (sweet_lo <= ask <= sweet_hi):
-            print(f"[skip] ask {ask} outside sweet spot [{sweet_lo},{sweet_hi}]  "
-                  f"market={market.title[:50]}", flush=True)
-            bot_logger.skip("ask_outside_sweet_band", ts=trade.ts,
-                            ret_60s_pct=ret, ask=ask,
-                            sweet_lo=sweet_lo, sweet_hi=sweet_hi,
-                            market_id=market.condition_id)
-            last_signal_ts = trade.ts
-            continue
+        if not isinstance(book_decision, OrderIntent):
+            raise TypeError(f"unexpected book decision {book_decision!r}")
 
         # Place order
         size_usdc = trader.config.max_order_usdc
         intent_id = str(uuid4())
         result = await loop.run_in_executor(
-            None, trader.place_buy_fok, target_token, ask, size_usdc
+            None, trader.place_buy_fok, book_decision.target_token, book_decision.limit_price, size_usdc
         )
         t3 = time.monotonic()
         lat_ms_decide = round((t1 - t0) * 1000, 1)
@@ -297,12 +333,12 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
             "ret_60s_pct": ret,
             "btc_price": trade.price,        # legacy alias for backward compat
             "btc_ret_60s_pct": ret,          # legacy alias for backward compat
-            "market_title": market.title,
-            "market_condition_id": market.condition_id,
-            "market_end": market.window_end_iso,
-            "direction": direction,
-            "token_id": target_token,
-            "ask": ask,
+            "market_title": book_decision.market_title,
+            "market_condition_id": book_decision.market_id,
+            "market_end": prebook.market.window_end_iso,
+            "direction": book_decision.outcome_name,
+            "token_id": book_decision.target_token,
+            "ask": book_decision.limit_price,
             "size_usdc": size_usdc,
             "order_ok": result.ok,
             "order_id": result.order_id,
@@ -320,9 +356,9 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
             result.filled_size and result.filled_price) else None
         bot_logger.fire(
             ts=trade.ts, intent_id=intent_id, venue="polymarket",
-            market_id=market.condition_id, market_title=market.title,
-            outcome_name=direction, side="buy", order_type="fok_limit",
-            size_usdc=size_usdc, limit_price=ask,
+            market_id=book_decision.market_id, market_title=book_decision.market_title,
+            outcome_name=book_decision.outcome_name, side="buy", order_type="fok_limit",
+            size_usdc=size_usdc, limit_price=book_decision.limit_price,
             filled_size=result.filled_size, filled_price=result.filled_price,
             cost_usdc=cost, order_ok=result.ok, order_id=result.order_id,
             dry_run=trader.config.dry_run,
@@ -333,9 +369,10 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         )
         status = "DRY" if trader.config.dry_run else ("OK" if result.ok else "FAIL")
         print(f"[ORDER {status}] {trade.ts.strftime('%H:%M:%S')}  ret={ret:+.3f}%  "
-              f"dir={direction}  ask={ask}  market='{market.title[:50]}'  "
+              f"dir={book_decision.outcome_name}  ask={book_decision.limit_price}  "
+              f"market='{book_decision.market_title[:50]}'  "
               f"error={result.error}", flush=True)
-        last_signal_ts = trade.ts
+        strategy_state.mark_signal(trade.ts)
 
 
 def main() -> int:

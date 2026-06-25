@@ -8,6 +8,7 @@ __pycache__/
 !**/.env.example
 data_cache/
 logs/
+control-center/data/
 *.csv
 *.parquet
 polymarket/polymarket_creds.json

@@ -204,3 +204,33 @@ services:
       - ./hyperliquid/.env
     volumes:
       - ./hyperliquid/logs:/app/hyperliquid/logs
+
+  # --- Read-only fleet observability and log control center ---
+  # Serves an authenticated web UI that indexes bot JSONL + Hyperliquid logs
+  # into SQLite. It does not receive trading credentials and mounts runtime logs
+  # read-only. Bind defaults to localhost; use SSH tunneling for remote access:
+  #   ssh -L 8080:127.0.0.1:8080 root@<host>
+  control-center:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polymarket-bot:latest
+    restart: unless-stopped
+    container_name: trading-control-center
+    working_dir: /app
+    command: ["python3", "control-center/app.py"]
+    environment:
+      CONTROL_CENTER_USER: "${CONTROL_CENTER_USER:-admin}"
+      CONTROL_CENTER_PASSWORD: "${CONTROL_CENTER_PASSWORD:-change-me}"
+      CONTROL_CENTER_SYNC_INTERVAL_S: "${CONTROL_CENTER_SYNC_INTERVAL_S:-30}"
+      POLYMARKET_LOG_DIR: /app/polymarket/logs
+      HYPERLIQUID_LOG_DIR: /app/hyperliquid/logs
+      CONTROL_CENTER_DB: /app/control-center/data/control_center.sqlite3
+      DOCKER_SOCKET: /var/run/docker.sock
+    ports:
+      - "${CONTROL_CENTER_BIND:-127.0.0.1}:8080:8080"
+    volumes:
+      - ./polymarket/logs:/app/polymarket/logs:ro
+      - ./hyperliquid/logs:/app/hyperliquid/logs:ro
+      - ./control-center/data:/app/control-center/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro

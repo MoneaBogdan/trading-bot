@@ -1382,16 +1382,40 @@ The live bot must keep running. Each phase is a non-breaking commit; nothing is 
 - `reports/STRATEGY_FINDINGS.md` — running curated log of evidence-based findings so we don't relearn the same lessons. Daily reports under `reports/<date>.md` are kept in git.
 - Sweet-band v2 applied: all 6 main variants → `[0.60, 0.75]`; `trader-eth-5m-wide` refocused to `[0.75, 0.90]` as a tail-bucket probe.
 
-### Phase C — Strategy extraction
-- Extract latency-arb decision tree from `polymarket/live_trader.py` into `src/strategies/polymarket_latency_arb.py`, matching the contract in §7.
-- `polymarket/live_trader.py` becomes a thin shim that constructs the strategy + drives it with the existing async stream loop. Zero behavior change.
-- Add unit tests: feed canned event sequences, assert intent emissions.
+### Phase C — Strategy extraction 🟡 (local workspace, not deployed — status 2026-06-21)
+- ✅ `src/strategies/polymarket_latency_arb.py` now contains the pure latency-arb decision tree:
+  signal gate (`threshold` / `cooldown` / Coinbase confirmation), market/window-anchor
+  gate, and orderbook/sweet-band gate.
+- ✅ `polymarket/live_trader.py` is now a shim around that strategy logic while
+  keeping the current live responsibilities: Binance/Coinbase streams, Gamma market
+  refresh, orderbook lookup, FOK execution, legacy `logs/live_*.jsonl`, and
+  new-schema `BotLogger` writes.
+- ✅ Tests cover the pure decision cases and a mocked runner path:
+  `tests/test_polymarket_latency_arb.py` and `tests/test_live_trader_shim.py`.
+- ✅ Current local verification: `python3 -m unittest discover -s tests` passes
+  25 tests.
+- ⏳ Still required before calling Phase C production-complete: review the diff,
+  run a shadow/dry-run container with the shim, and confirm live log parity against
+  the pre-extraction behavior. No deployed bot has been switched because these
+  changes are currently local/uncommitted.
 
-### Phase D — Stream bus + supervisor
-- Implement `core/stream_bus.py`, `core/bot.py`, `core/supervisor.py`.
-- Add one new container `supervisor` that runs ONE bot (e.g. a new `eth-5m-via-supervisor`) alongside the existing 6.
-- After a week of clean operation, migrate remaining bots one at a time. Each migration is a one-line YAML add + a one-line compose remove.
-- When all six are on the supervisor, remove the per-variant docker services.
+### Phase D — Stream bus + supervisor 🟡 (local skeleton, not wired to live — status 2026-06-21)
+- ✅ `src/core/stream_bus.py` exists with `StreamSpec`, in-process publish/subscribe,
+  bounded subscriber queues, and `block` / `drop_oldest` / `drop_newest` policies.
+- ✅ `src/core/bot.py` exists with a minimal `BotRuntime` that consumes one or more
+  bus subscriptions and calls a sync or async handler.
+- ✅ `src/core/supervisor.py` exists with a conservative supervisor skeleton:
+  shared `StreamBus`, deduped data sources by stream specs, bot task startup,
+  cancellation cleanup, and error propagation.
+- ✅ Tests cover bus filtering/policies, bot runtime consumption/cleanup, and
+  supervisor source dedupe/lifecycle:
+  `tests/test_stream_bus.py`, `tests/test_bot_runtime.py`, `tests/test_supervisor.py`.
+- ⏳ Next Phase D step: add one shadow supervisor entry point/container that runs
+  ONE bot (e.g. `eth-5m-via-supervisor`) alongside the existing services without
+  removing any current per-variant trader.
+- ⏳ After a week of clean shadow operation, migrate remaining bots one at a time.
+  Each migration should be a small config/compose change; only remove per-variant
+  docker services after all six have proven stable under the supervisor.
 
 ### Phase E — Outcome tracker + unified backtester
 - Implement `core/outcome_tracker.py` (and `venues/polymarket/resolution.py`).
@@ -1403,6 +1427,12 @@ The live bot must keep running. Each phase is a non-breaking commit; nothing is 
 - Add `src/venues/hyperliquid/` if/when Phase 4 ships.
 
 ### Phase G — UI
+- ✅ Early operational sidecar exists in `control-center/` and `docker-compose.yml`:
+  authenticated read-only web UI indexing Polymarket/Hyperliquid JSONL into
+  SQLite, exposing overview/events/funding/files/container inventory. This is
+  useful now but is **not** the final Phase G UI described below.
+- ⏳ Final Phase G still waits for post-Phase-D/PnL schema stability and must add
+  halt controls plus fire/PnL history from the stable event model.
 
 **Rule:** no phase removes a working code path until the replacement has run live for ≥1 week.
 

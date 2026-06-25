@@ -1,5 +1,7 @@
 .git
 .gitignore
+.env
+.env.*
 .venv
 **/.venv
 **/__pycache__
@@ -7,6 +9,7 @@
 **/logs
 **/cache
 **/data_cache
+control-center/data
 **/*.parquet
 **/*.csv
 polymarket/.env

@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Trading Bot Control Center</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">TB</div>
+          <div>
+            <h1>Control Center</h1>
+            <p>Trading bot observability</p>
+          </div>
+        </div>
+        <nav>
+          <button class="nav-button active" data-view="overview">Overview</button>
+          <button class="nav-button" data-view="inventory">Inventory</button>
+          <button class="nav-button" data-view="events">Bot Events</button>
+          <button class="nav-button" data-view="funding">Funding</button>
+          <button class="nav-button" data-view="files">Files</button>
+          <button class="nav-button" data-view="ops">Ops</button>
+        </nav>
+        <div class="sync-card">
+          <span class="label">Last sync</span>
+          <strong id="last-sync">loading</strong>
+          <button id="sync-now" class="secondary">Resync</button>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <h2 id="view-title">Overview</h2>
+            <p id="view-subtitle">Fleet health, recent fires, and monitor activity.</p>
+          </div>
+          <div class="status-pill" id="auth-status">authenticated</div>
+        </header>
+
+        <section id="overview" class="view active">
+          <div class="metrics" id="metrics"></div>
+          <div class="grid two">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Bot Fleet</h3>
+                <button class="text-button" data-refresh>Refresh</button>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>Bot</th><th>Fires</th><th>Skips</th><th>Crashes</th><th>Last Event</th></tr>
+                  </thead>
+                  <tbody id="bot-table"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Event Mix</h3>
+              </div>
+              <div id="event-mix" class="bars"></div>
+            </section>
+          </div>
+          <div class="grid two">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Recent Fires</h3>
+              </div>
+              <div id="recent-fires" class="event-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Recent Funding Opportunities</h3>
+              </div>
+              <div id="recent-opps" class="event-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="inventory" class="view">
+          <section class="panel">
+            <div class="panel-head stacked">
+              <div>
+                <h3>Runtime Containers</h3>
+                <p>Live Docker status, strategy, and runtime config for the bot containers.</p>
+              </div>
+              <button id="load-containers">Refresh</button>
+            </div>
+            <div id="containers-error" class="inline-error" hidden></div>
+            <div class="table-wrap">
+              <table class="runtime-table">
+                <thead>
+                  <tr>
+                    <th>Container</th>
+                    <th>Status</th>
+                    <th>Strategy</th>
+                    <th>Runtime Config</th>
+                    <th>Started</th>
+                    <th>Restarts</th>
+                  </tr>
+                </thead>
+                <tbody id="containers-table"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head stacked">
+              <div>
+                <h3>Bot Inventory</h3>
+                <p>Grouped view of every bot with config, recent activity, and quick event filters.</p>
+              </div>
+              <button id="load-inventory">Refresh</button>
+            </div>
+            <div class="table-wrap">
+              <table class="inventory-table">
+                <thead>
+                  <tr>
+                    <th>Bot</th>
+                    <th>Activity</th>
+                    <th>Top Skip Reasons</th>
+                    <th>Latest Fire</th>
+                    <th>Config</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody id="inventory-table"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="events" class="view">
+          <section class="panel">
+            <div class="panel-head stacked">
+              <div>
+                <h3>Bot Events</h3>
+                <p>Filter new-schema rows from <code>polymarket/logs/bot=*/YYYY-MM-DD.jsonl</code>.</p>
+              </div>
+              <div class="filters">
+                <select id="event-bot">
+                  <option value="">all bots</option>
+                </select>
+                <select id="event-type">
+                  <option value="">all events</option>
+                  <option value="fire">fire</option>
+                  <option value="skip">skip</option>
+                  <option value="boot">boot</option>
+                  <option value="bot_crashed">bot_crashed</option>
+                </select>
+                <input id="event-reason" placeholder="reason" />
+                <button id="load-events">Load</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Time</th><th>Bot</th><th>Event</th><th>Reason</th><th>Market</th><th>Side</th><th>Price</th><th>Raw</th></tr>
+                </thead>
+                <tbody id="events-table"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="funding" class="view">
+          <section class="panel">
+            <div class="panel-head stacked">
+              <div>
+                <h3>Funding Monitor</h3>
+                <p>Snapshots and opportunities from Hyperliquid/Binance/Bybit/Drift/Paradex polling.</p>
+              </div>
+              <div class="filters">
+                <select id="funding-event">
+                  <option value="opportunity">opportunity</option>
+                  <option value="snapshot">snapshot</option>
+                  <option value="">all events</option>
+                </select>
+                <select id="funding-asset">
+                  <option value="">all assets</option>
+                  <option value="BTC">BTC</option>
+                  <option value="ETH">ETH</option>
+                  <option value="SOL">SOL</option>
+                </select>
+                <button id="load-funding">Load</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th>Time</th><th>Asset</th><th>Pair</th><th>Spread</th><th>Net 8h</th><th>APR</th><th>Raw</th></tr>
+                </thead>
+                <tbody id="funding-table"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section id="files" class="view">
+          <section class="panel">
+            <div class="panel-head stacked">
+              <div>
+                <h3>Log Files</h3>
+                <p>Inspect file freshness, size, and raw tails without SSH.</p>
+              </div>
+              <div class="filters">
+                <select id="file-family">
+                  <option value="">all families</option>
+                  <option value="polymarket">polymarket</option>
+                  <option value="hyperliquid">hyperliquid</option>
+                </select>
+                <label class="select-label" for="file-limit">Show files</label>
+                <select id="file-limit">
+                  <option value="25">25</option>
+                  <option value="50" selected>50</option>
+                  <option value="100">100</option>
+                  <option value="200">200</option>
+                  <option value="300">300</option>
+                </select>
+                <button id="load-files">Load</button>
+              </div>
+            </div>
+            <div class="file-layout">
+              <div class="tail-panel">
+                <div class="tail-toolbar">
+                  <strong id="tail-title">Log Tail</strong>
+                  <div class="filters">
+                    <label class="select-label" for="tail-lines">Tail lines</label>
+                    <select id="tail-lines">
+                      <option value="40">40</option>
+                      <option value="80">80</option>
+                      <option value="120" selected>120</option>
+                      <option value="200">200</option>
+                      <option value="500">500</option>
+                    </select>
+                  </div>
+                </div>
+                <pre id="tail-output" class="tail-box">Select a file to view its tail.</pre>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr><th>File</th><th>Family</th><th>Size</th><th>Modified</th><th></th></tr>
+                  </thead>
+                  <tbody id="files-table"></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="ops" class="view">
+          <div class="grid two">
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Collector</h3>
+              </div>
+              <dl class="facts" id="collector-facts"></dl>
+              <button id="ops-resync">Run Full Resync</button>
+            </section>
+            <section class="panel">
+              <div class="panel-head">
+                <h3>Suggested Next Controls</h3>
+              </div>
+              <ul class="todo-list">
+                <li>Daily report generation from the indexed DB.</li>
+                <li>Read-only Docker health bridge for container uptime.</li>
+                <li>Market resolution reconciliation and PnL joins.</li>
+                <li>Manual halt-file toggles after explicit operator confirmation.</li>
+                <li>Notes/audit log for strategy changes and findings.</li>
+              </ul>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <div id="toast" class="toast"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

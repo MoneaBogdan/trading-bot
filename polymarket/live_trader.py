@@ -38,6 +38,7 @@ from coinbase_stream import stream_trades as stream_coinbase_trades  # noqa: E40
 from gamma import discover_markets  # noqa: E402
 from monitor import MoveTracker, _pick_market  # noqa: E402
 from orderbook_ws_cache import OrderbookCache  # noqa: E402
+from kill_switch import kill_switch_from_env  # noqa: E402
 from trader import trader_from_env  # noqa: E402
 from src.core.logger import BotLogger  # noqa: E402
 from src.strategies.polymarket_latency_arb import (  # noqa: E402
@@ -159,6 +160,15 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
     print(f"[trader] dry_run={trader.config.dry_run}  "
           f"max_order=${trader.config.max_order_usdc}  "
           f"max_daily=${trader.config.max_daily_usdc}", flush=True)
+    kill_switch = kill_switch_from_env() if not trader.config.dry_run else None
+    if kill_switch is not None:
+        kill_switch.set_event_sink(
+            lambda event, payload: bot_logger.log(event, **payload)
+        )
+        asyncio.create_task(kill_switch.poll_loop())
+        print(f"[kill-switch] active  daily_pnl_limit=${kill_switch.daily_pnl_limit_usdc}  "
+              f"loss_streak_limit={kill_switch.loss_streak_limit}  "
+              f"poll_s={kill_switch.poll_interval_s}", flush=True)
     print(f"[strategy] asset={asset}  timeframe={timeframe_min}m  "
           f"threshold={threshold_pct}%  cooldown={cooldown_s}s  "
           f"sweet_spot=[{sweet_lo},{sweet_hi}]  "
@@ -314,6 +324,15 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
         if not isinstance(book_decision, OrderIntent):
             raise TypeError(f"unexpected book decision {book_decision!r}")
 
+        # Live-mode kill switch (no-op in dry-run)
+        if kill_switch is not None:
+            ok, halt_reason = kill_switch.can_trade()
+            if not ok:
+                print(f"[skip] kill switch active: {halt_reason}", flush=True)
+                bot_logger.skip("kill_switch_active", ts=trade.ts,
+                                halt_reason=halt_reason)
+                continue
+
         # Place order
         size_usdc = trader.config.max_order_usdc
         intent_id = str(uuid4())
@@ -367,6 +386,15 @@ async def run(log_path: Path, threshold_pct: float, cooldown_s: float,
             lat_ms_decide=lat_ms_decide, lat_ms_book=lat_ms_book,
             lat_ms_order=lat_ms_order, book_source=book_source,
         )
+        if kill_switch is not None and result.ok and not trader.config.dry_run:
+            kill_switch.record_fill(
+                market_id=book_decision.market_id,
+                outcome_name=book_decision.outcome_name,
+                size_usdc=size_usdc,
+                fill_price=result.filled_price or book_decision.limit_price,
+                fill_ts=trade.ts,
+                market_end_iso=prebook.market.window_end_iso,
+            )
         status = "DRY" if trader.config.dry_run else ("OK" if result.ok else "FAIL")
         print(f"[ORDER {status}] {trade.ts.strftime('%H:%M:%S')}  ret={ret:+.3f}%  "
               f"dir={book_decision.outcome_name}  ask={book_decision.limit_price}  "

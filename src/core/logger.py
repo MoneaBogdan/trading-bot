@@ -30,6 +30,7 @@ KNOWN_SKIP_REASONS = frozenset({
     "no_market_in_window", "no_window_open_price", "window_anchor_disagree",
     "no_ask_on_side", "ask_outside_sweet_band",
     "daily_cap_reached", "open_position_cap_reached",
+    "kill_switch_active",
     # news_alpha strategy skip reasons
     "news_neutral_direction", "news_low_confidence", "news_asset_out_of_scope",
     "news_cooldown_active", "news_daily_cap_reached", "news_no_open_market",

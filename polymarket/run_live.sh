@@ -25,6 +25,15 @@ REQUIRE_CONFIRM="${REQUIRE_CONFIRM:-1}"
 SNIPE_WINDOW_S="${SNIPE_WINDOW_S:-300}"  # 300 = no tight snipe; anchor alone is EV-max per 2026-06-09 backtest
 REQUIRE_WINDOW_ANCHOR="${REQUIRE_WINDOW_ANCHOR:-1}"
 
+# Live-mode size caps. Default to $1/order so the first 50 live fires are cheap
+# parity-checks; raise via env once dry-vs-live behavior is confirmed.
+# Kill switch (see polymarket/kill_switch.py) auto-halts the day when
+# daily PnL <= POLY_KILL_DAILY_PNL_USDC or loss streak >= POLY_KILL_LOSS_STREAK.
+export POLY_MAX_ORDER_USDC="${POLY_MAX_ORDER_USDC:-1}"
+export POLY_MAX_DAILY_USDC="${POLY_MAX_DAILY_USDC:-20}"
+export POLY_KILL_DAILY_PNL_USDC="${POLY_KILL_DAILY_PNL_USDC:--10}"
+export POLY_KILL_LOSS_STREAK="${POLY_KILL_LOSS_STREAK:-3}"
+
 # Variant tag used in log filenames. Special-case BTC 5m to keep the legacy
 # `live_<date>.jsonl` filename and preserve backward compatibility with old logs.
 VARIANT="$(echo "$ASSET" | tr '[:upper:]' '[:lower:]')-${TIMEFRAME_MIN}m"

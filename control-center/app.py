@@ -24,6 +24,7 @@ POLY_LOG_DIR = Path(os.environ.get("POLYMARKET_LOG_DIR", "/app/polymarket/logs")
 HL_LOG_DIR = Path(os.environ.get("HYPERLIQUID_LOG_DIR", "/app/hyperliquid/logs"))
 DOCKER_SOCKET = Path(os.environ.get("DOCKER_SOCKET", "/var/run/docker.sock"))
 SYNC_INTERVAL_S = int(os.environ.get("CONTROL_CENTER_SYNC_INTERVAL_S", "30"))
+PNL_SNAPSHOT_INTERVAL_S = int(os.environ.get("CONTROL_CENTER_PNL_INTERVAL_S", "1800"))
 HTTP_HOST = os.environ.get("CONTROL_CENTER_HOST", "0.0.0.0")
 HTTP_PORT = int(os.environ.get("CONTROL_CENTER_PORT", "8080"))
 AUTH_USER = os.environ.get("CONTROL_CENTER_USER", "admin")
@@ -31,6 +32,7 @@ AUTH_PASSWORD = os.environ.get("CONTROL_CENTER_PASSWORD", "change-me")
 
 DB_LOCK = threading.Lock()
 LAST_SYNC: dict[str, Any] = {"running": False, "ok": None, "error": None, "ts": None}
+LAST_PNL: dict[str, Any] = {"running": False, "ok": None, "error": None, "ts": None}
 
 
 def utc_now() -> str:
@@ -117,6 +119,21 @@ def init_db() -> None:
                 mtime REAL NOT NULL,
                 updated_ts TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS pnl_daily (
+                bot TEXT NOT NULL,
+                date TEXT NOT NULL,
+                fires INTEGER NOT NULL,
+                resolved INTEGER NOT NULL,
+                wins INTEGER NOT NULL,
+                losses INTEGER NOT NULL,
+                pending INTEGER NOT NULL,
+                pnl_usdc REAL NOT NULL,
+                cum_pnl_usdc REAL NOT NULL,
+                snapshot_ts TEXT NOT NULL,
+                PRIMARY KEY (bot, date)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pnl_bot_date ON pnl_daily(bot, date);
             """
         )
 
@@ -287,6 +304,84 @@ def sync_loop() -> None:
         time.sleep(SYNC_INTERVAL_S)
 
 
+def pnl_snapshot_once() -> dict[str, Any]:
+    """Resolve every fire's market via gamma, persist per-bot daily PnL."""
+    from collections import defaultdict
+    from polymarket.backtest.daily_report import _fire_cid, _fire_pnl, _resolve_markets
+    from polymarket.backtest.cumulative_report import _collect_fires
+
+    started = time.time()
+    LAST_PNL.update({"running": True, "ts": utc_now(), "error": None})
+    try:
+        fires_by_bot, cids_by_date = _collect_fires(POLY_LOG_DIR, asof_date=None)
+        winners: dict[str, str] = {}
+        for d in sorted(cids_by_date):
+            won = _resolve_markets(cids_by_date[d], d)
+            winners.update(won)
+
+        # Tally per (bot, date) then cumulative
+        daily: dict[str, dict[str, dict[str, float]]] = defaultdict(
+            lambda: defaultdict(lambda: {"fires": 0, "wins": 0, "losses": 0, "pending": 0, "pnl": 0.0})
+        )
+        for bot, fires in fires_by_bot.items():
+            for date_str, fire in fires:
+                cid = _fire_cid(fire)
+                winner = winners.get(cid) if cid else None
+                p, status = _fire_pnl(fire, winner)
+                cell = daily[bot][date_str]
+                cell["fires"] += 1
+                cell["pnl"] += p
+                if status == "WIN":
+                    cell["wins"] += 1
+                elif status == "LOSS":
+                    cell["losses"] += 1
+                else:
+                    cell["pending"] += 1
+
+        snapshot_ts = utc_now()
+        rows_written = 0
+        with DB_LOCK, db_connect() as conn:
+            conn.execute("DELETE FROM pnl_daily")
+            for bot in sorted(daily):
+                cum = 0.0
+                for date_str in sorted(daily[bot]):
+                    cell = daily[bot][date_str]
+                    cum += cell["pnl"]
+                    resolved = int(cell["wins"] + cell["losses"])
+                    conn.execute(
+                        "INSERT INTO pnl_daily(bot, date, fires, resolved, wins, losses, "
+                        "pending, pnl_usdc, cum_pnl_usdc, snapshot_ts) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                        (bot, date_str, int(cell["fires"]), resolved, int(cell["wins"]),
+                         int(cell["losses"]), int(cell["pending"]),
+                         round(cell["pnl"], 4), round(cum, 4), snapshot_ts),
+                    )
+                    rows_written += 1
+            conn.commit()
+        result = {
+            "bots": len(daily),
+            "rows": rows_written,
+            "duration_s": round(time.time() - started, 3),
+            "ts": snapshot_ts,
+        }
+        LAST_PNL.update({"running": False, "ok": result, "error": None, "ts": snapshot_ts})
+        print(f"[control-center] pnl snapshot {result}", flush=True)
+        return result
+    except Exception as exc:
+        LAST_PNL.update({"running": False, "ok": None,
+                         "error": f"{type(exc).__name__}: {exc}", "ts": utc_now()})
+        raise
+
+
+def pnl_loop() -> None:
+    while True:
+        try:
+            pnl_snapshot_once()
+        except Exception as exc:
+            print(f"[control-center] pnl snapshot failed: {type(exc).__name__}: {exc}", flush=True)
+        time.sleep(PNL_SNAPSHOT_INTERVAL_S)
+
+
 def _float(value: Any) -> float | None:
     if value is None:
         return None
@@ -335,8 +430,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(api_files(query))
             elif path == "/api/tail":
                 self.send_json(api_tail(query))
+            elif path == "/api/pnl":
+                self.send_json(api_pnl(query))
             elif path == "/health":
-                self.send_json({"ok": True, "last_sync": LAST_SYNC, "time": utc_now()})
+                self.send_json({"ok": True, "last_sync": LAST_SYNC,
+                                "last_pnl": LAST_PNL, "time": utc_now()})
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -349,6 +447,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parsed.path == "/api/resync":
                 self.send_json(sync_once())
+            elif parsed.path == "/api/pnl/refresh":
+                self.send_json(pnl_snapshot_once())
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
         except Exception as exc:
@@ -687,6 +787,29 @@ def api_tail(query: dict[str, list[str]]) -> dict[str, Any]:
     return {"path": str(path), "lines": tail_file(path, lines)}
 
 
+def api_pnl(query: dict[str, list[str]]) -> dict[str, Any]:
+    bot = query.get("bot", [""])[0]
+    with db_connect() as conn:
+        bots = [r["bot"] for r in conn.execute(
+            "SELECT DISTINCT bot FROM pnl_daily ORDER BY bot"
+        ).fetchall()]
+        sql = ("SELECT bot, date, fires, resolved, wins, losses, pending, "
+               "pnl_usdc, cum_pnl_usdc FROM pnl_daily")
+        params: list[Any] = []
+        if bot:
+            sql += " WHERE bot=?"
+            params.append(bot)
+        sql += " ORDER BY bot, date"
+        series = rows_to_dicts(conn.execute(sql, params).fetchall())
+        totals = rows_to_dicts(conn.execute(
+            "SELECT bot, SUM(fires) AS fires, SUM(resolved) AS resolved, "
+            "SUM(wins) AS wins, SUM(losses) AS losses, SUM(pending) AS pending, "
+            "ROUND(SUM(pnl_usdc), 4) AS pnl_usdc, MIN(date) AS first_day, "
+            "MAX(date) AS last_day FROM pnl_daily GROUP BY bot ORDER BY bot"
+        ).fetchall())
+    return {"bots": bots, "series": series, "totals": totals, "last_snapshot": LAST_PNL}
+
+
 def bounded_int(value: str, lo: int, hi: int) -> int:
     try:
         parsed = int(value)
@@ -723,6 +846,7 @@ def content_type_for(path: str) -> str:
 def main() -> None:
     init_db()
     threading.Thread(target=sync_loop, daemon=True).start()
+    threading.Thread(target=pnl_loop, daemon=True).start()
     print(
         f"[control-center] listening on {HTTP_HOST}:{HTTP_PORT} "
         f"user={AUTH_USER!r} db={DB_PATH}",

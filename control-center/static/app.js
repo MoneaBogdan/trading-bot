@@ -4,6 +4,7 @@ const state = {
   containers: [],
   tailPath: "",
   activeView: "overview",
+  pnl: { bots: [], series: [], totals: [], last_snapshot: null, selected: "" },
 };
 
 const titles = {
@@ -12,6 +13,7 @@ const titles = {
   events: ["Bot Events", "Search and inspect normalized bot JSONL rows."],
   funding: ["Funding", "Monitor spreads, opportunities, and cost-adjusted paper PnL."],
   files: ["Files", "Inspect log freshness and raw tails."],
+  pnl: ["PnL", "Per-bot cumulative PnL chart resolved via Polymarket gamma."],
   ops: ["Ops", "Collector state and safe maintenance actions."],
 };
 
@@ -429,6 +431,134 @@ async function loadTail(encodedPath = state.tailPath) {
   $("#tail-output").textContent = data.lines.join("\n");
 }
 
+async function loadPnl(preserveSelection = true) {
+  const previous = preserveSelection ? state.pnl.selected : "";
+  const data = await api("/api/pnl");
+  state.pnl.bots = data.bots || [];
+  state.pnl.series = data.series || [];
+  state.pnl.totals = data.totals || [];
+  state.pnl.last_snapshot = data.last_snapshot || null;
+  const select = $("#pnl-bot");
+  const desired = previous && state.pnl.bots.includes(previous)
+    ? previous
+    : (state.pnl.bots[0] || "");
+  state.pnl.selected = desired;
+  select.innerHTML = state.pnl.bots
+    .map((b) => `<option value="${b}"${b === desired ? " selected" : ""}>${b}</option>`)
+    .join("");
+  renderPnlMeta();
+  renderPnlChart();
+  renderPnlTotals();
+}
+
+function renderPnlMeta() {
+  const meta = state.pnl.last_snapshot;
+  const node = $("#pnl-snapshot-meta");
+  if (!meta || !meta.ok) {
+    node.textContent = meta && meta.error
+      ? `last snapshot failed: ${meta.error}`
+      : "no snapshot yet — runs on container start";
+    return;
+  }
+  const { rows, bots, duration_s, ts } = meta.ok;
+  node.textContent = `snapshot ${fmtTime(ts)} · ${bots} bots · ${rows} day-rows · ${duration_s}s`;
+}
+
+function renderPnlChart() {
+  const svg = $("#pnl-chart");
+  const bot = state.pnl.selected;
+  const series = state.pnl.series.filter((r) => r.bot === bot);
+  if (!series.length) {
+    svg.innerHTML = `<text x="450" y="160" text-anchor="middle" fill="#aaa">no data</text>`;
+    return;
+  }
+  const W = 900, H = 320, padL = 60, padR = 20, padT = 20, padB = 40;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const cums = series.map((r) => r.cum_pnl_usdc);
+  const dailies = series.map((r) => r.pnl_usdc);
+  const yMin = Math.min(0, ...cums, ...dailies);
+  const yMax = Math.max(0, ...cums, ...dailies);
+  const yPad = (yMax - yMin) * 0.1 || 1;
+  const lo = yMin - yPad, hi = yMax + yPad;
+  const x = (i) => padL + (series.length === 1 ? innerW / 2 : (i * innerW) / (series.length - 1));
+  const y = (v) => padT + innerH - ((v - lo) / (hi - lo)) * innerH;
+  const zeroY = y(0);
+  const barW = Math.max(2, Math.min(20, innerW / series.length - 2));
+  const bars = series.map((r, i) => {
+    const top = r.pnl_usdc >= 0 ? y(r.pnl_usdc) : zeroY;
+    const h = Math.abs(zeroY - y(r.pnl_usdc));
+    const color = r.pnl_usdc >= 0 ? "#3aaa6a" : "#d05a5a";
+    return `<rect x="${x(i) - barW / 2}" y="${top}" width="${barW}" height="${h}"
+            fill="${color}" opacity="0.5"><title>${r.date} daily ${fmtMoney(r.pnl_usdc)}</title></rect>`;
+  }).join("");
+  const linePoints = series.map((r, i) => `${x(i)},${y(r.cum_pnl_usdc)}`).join(" ");
+  const dots = series.map((r, i) =>
+    `<circle cx="${x(i)}" cy="${y(r.cum_pnl_usdc)}" r="2.5" fill="#4ea2ff">
+       <title>${r.date} cum ${fmtMoney(r.cum_pnl_usdc)} · ${r.wins}W/${r.losses}L · ${r.pending}p</title>
+     </circle>`).join("");
+  const yTicks = [lo, (lo + hi) / 2, hi].map((v) =>
+    `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"
+       stroke="#333" stroke-dasharray="2 3"/>
+     <text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="#aaa">
+       ${fmtMoney(v)}</text>`).join("");
+  const xTickEvery = Math.ceil(series.length / 8);
+  const xTicks = series.map((r, i) =>
+    i % xTickEvery === 0
+      ? `<text x="${x(i)}" y="${H - padB + 16}" text-anchor="middle"
+           font-size="10" fill="#aaa">${r.date.slice(5)}</text>`
+      : "").join("");
+  const zeroLine = `<line x1="${padL}" x2="${W - padR}" y1="${zeroY}" y2="${zeroY}"
+                      stroke="#888" stroke-width="1"/>`;
+  svg.innerHTML = yTicks + xTicks + zeroLine + bars
+    + `<polyline points="${linePoints}" fill="none" stroke="#4ea2ff" stroke-width="2"/>`
+    + dots;
+}
+
+function renderPnlTotals() {
+  const tbody = $("#pnl-totals");
+  if (!state.pnl.totals.length) {
+    tbody.innerHTML = `<tr><td colspan="8">no snapshot yet</td></tr>`;
+    return;
+  }
+  let grand = { fires: 0, resolved: 0, wins: 0, losses: 0, pending: 0, pnl: 0 };
+  const rows = state.pnl.totals.map((t) => {
+    grand.fires += t.fires; grand.resolved += t.resolved;
+    grand.wins += t.wins; grand.losses += t.losses;
+    grand.pending += t.pending; grand.pnl += Number(t.pnl_usdc) || 0;
+    const wr = t.resolved ? `${Math.round((t.wins / t.resolved) * 100)}%` : "—";
+    const cls = (Number(t.pnl_usdc) || 0) >= 0 ? "pnl-pos" : "pnl-neg";
+    return `<tr>
+      <td><code>${t.bot}</code></td>
+      <td>${t.first_day} → ${t.last_day}</td>
+      <td class="num">${t.fires}</td>
+      <td class="num">${t.wins}</td>
+      <td class="num">${t.losses}</td>
+      <td class="num">${t.pending}</td>
+      <td class="num">${wr}</td>
+      <td class="num ${cls}"><strong>${fmtMoney(t.pnl_usdc)}</strong></td>
+    </tr>`;
+  }).join("");
+  const grandWr = grand.resolved ? `${Math.round((grand.wins / grand.resolved) * 100)}%` : "—";
+  const grandCls = grand.pnl >= 0 ? "pnl-pos" : "pnl-neg";
+  tbody.innerHTML = rows + `<tr class="totals-row">
+    <td><strong>TOTAL</strong></td><td>—</td>
+    <td class="num"><strong>${grand.fires}</strong></td>
+    <td class="num"><strong>${grand.wins}</strong></td>
+    <td class="num"><strong>${grand.losses}</strong></td>
+    <td class="num"><strong>${grand.pending}</strong></td>
+    <td class="num"><strong>${grandWr}</strong></td>
+    <td class="num ${grandCls}"><strong>${fmtMoney(grand.pnl)}</strong></td>
+  </tr>`;
+}
+
+async function refreshPnlSnapshot() {
+  toast("Refreshing PnL snapshot — gamma calls take ~20s");
+  await api("/api/pnl/refresh", { method: "POST" });
+  await loadPnl();
+  toast("PnL snapshot updated");
+}
+
 async function runResync() {
   toast("Resync started");
   const result = await api("/api/resync", { method: "POST" });
@@ -453,6 +583,13 @@ function bindUI() {
   $("#load-files").addEventListener("click", loadFiles);
   $("#file-limit").addEventListener("change", loadFiles);
   $("#tail-lines").addEventListener("change", () => loadTail());
+  $("#pnl-bot").addEventListener("change", (e) => {
+    state.pnl.selected = e.target.value;
+    renderPnlChart();
+  });
+  $("#pnl-refresh").addEventListener("click", () => {
+    refreshPnlSnapshot().catch((err) => toast(err.message));
+  });
 }
 
 async function boot() {
@@ -463,8 +600,10 @@ async function boot() {
   await loadEvents();
   await loadFunding();
   await loadFiles();
+  await loadPnl(false).catch((err) => toast(`PnL: ${err.message}`));
   setInterval(loadSummary, 30000);
   setInterval(loadContainers, 30000);
+  setInterval(() => loadPnl().catch(() => {}), 300000);
 }
 
 boot().catch((error) => {

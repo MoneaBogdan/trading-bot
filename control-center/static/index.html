@@ -22,6 +22,7 @@
           <button class="nav-button" data-view="events">Bot Events</button>
           <button class="nav-button" data-view="funding">Funding</button>
           <button class="nav-button" data-view="files">Files</button>
+          <button class="nav-button" data-view="pnl">PnL</button>
           <button class="nav-button" data-view="ops">Ops</button>
         </nav>
         <div class="sync-card">
@@ -248,6 +249,42 @@
                   <tbody id="files-table"></tbody>
                 </table>
               </div>
+            </div>
+          </section>
+        </section>
+
+        <section id="pnl" class="view">
+          <section class="panel">
+            <div class="panel-head stacked">
+              <div>
+                <h3>Per-Bot Cumulative PnL</h3>
+                <p>Resolved via Polymarket gamma. Pending markets contribute $0
+                  until they settle. Snapshot refreshes every 30 min.</p>
+              </div>
+              <div class="filters">
+                <label class="select-label" for="pnl-bot">Bot</label>
+                <select id="pnl-bot"></select>
+                <button id="pnl-refresh">Refresh now</button>
+              </div>
+            </div>
+            <div id="pnl-snapshot-meta" class="muted"></div>
+            <div class="pnl-chart-wrap">
+              <svg id="pnl-chart" viewBox="0 0 900 320"
+                   preserveAspectRatio="none" role="img"
+                   aria-label="Cumulative PnL chart"></svg>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Bot</th><th>First → Last</th>
+                    <th class="num">Fires</th><th class="num">W</th>
+                    <th class="num">L</th><th class="num">Pending</th>
+                    <th class="num">Win%</th><th class="num">PnL (USDC)</th>
+                  </tr>
+                </thead>
+                <tbody id="pnl-totals"></tbody>
+              </table>
             </div>
           </section>
         </section>

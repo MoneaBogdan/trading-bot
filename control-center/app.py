@@ -7,6 +7,7 @@ import os
 import secrets
 import socket
 import sqlite3
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -18,6 +19,36 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 APP_ROOT = Path(__file__).resolve().parent
+
+
+def _register_local_polymarket() -> None:
+    """Make `polymarket.backtest.*` resolve to this repo's local source tree.
+
+    The deployed image also ships the third-party `polymarket-client` package
+    (installed as top-level `polymarket`), which shadows the local `polymarket/`
+    directory. The PnL snapshot needs the LOCAL tree (`polymarket.backtest`).
+    We register the local dirs as the `polymarket` / `polymarket.backtest`
+    packages for THIS process only — deliberately NOT via a committed
+    `polymarket/__init__.py`, because the trader processes put the repo root on
+    sys.path[0] and legitimately need `import polymarket` to be the client lib
+    (a global __init__.py would break their SecureClient import).
+    """
+    import types
+
+    if getattr(sys.modules.get("polymarket"), "__file__", None):
+        return  # a real `polymarket` package is already imported; leave it alone
+    poly_dir = APP_ROOT.parent / "polymarket"
+    for name, path in (
+        ("polymarket", poly_dir),
+        ("polymarket.backtest", poly_dir / "backtest"),
+    ):
+        if name not in sys.modules:
+            mod = types.ModuleType(name)
+            mod.__path__ = [str(path)]
+            sys.modules[name] = mod
+
+
+_register_local_polymarket()
 STATIC_ROOT = APP_ROOT / "static"
 DB_PATH = Path(os.environ.get("CONTROL_CENTER_DB", "/app/control-center/data/control_center.sqlite3"))
 POLY_LOG_DIR = Path(os.environ.get("POLYMARKET_LOG_DIR", "/app/polymarket/logs"))

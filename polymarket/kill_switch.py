@@ -26,9 +26,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-import sys
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from polymarket.backtest.daily_report import _resolve_markets  # noqa: E402
+# Load _resolve_markets straight from the local backtest source file. We avoid
+# `from polymarket.backtest...` (and avoid putting the repo root on sys.path)
+# because this module is imported by live_trader.py inside the trader process,
+# where `polymarket` must remain the third-party `polymarket-client` package for
+# trader.py's `from polymarket import SecureClient`. daily_report.py only needs
+# stdlib + httpx at import time, so a file-path load can't poison sys.modules.
+import importlib.util as _importlib_util
+
+_daily_report_path = Path(__file__).resolve().parent / "backtest" / "daily_report.py"
+_daily_report_spec = _importlib_util.spec_from_file_location(
+    "_kill_switch_daily_report", _daily_report_path
+)
+_daily_report = _importlib_util.module_from_spec(_daily_report_spec)
+_daily_report_spec.loader.exec_module(_daily_report)
+_resolve_markets = _daily_report._resolve_markets
 
 
 @dataclass

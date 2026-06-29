@@ -180,6 +180,39 @@ services:
       SWEET_HI: "0.75"
       POLY_BOOK_WS_CACHE: "${POLY_BOOK_WS_CACHE:-false}"
 
+  # --- Phase D shadow: supervisor-managed ETH-5m bot, paper-only ---
+  # Exercises the new StreamBus + BotRuntime + Supervisor stack with the
+  # extracted latency-arb strategy WITHOUT placing orders — logs what it
+  # *would* have done as bot `eth-5m-via-supervisor`, to prove parity with the
+  # legacy per-variant traders before migrating them onto the supervisor.
+  # See ARCHITECTURE.md Phase D. Deliberately does NOT use the *image anchor:
+  # no env_file / no creds mount (it never trades), only the logs volume.
+  supervisor-shadow-eth-5m:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polymarket-bot:latest
+    restart: unless-stopped
+    container_name: polymarket-supervisor-shadow-eth-5m
+    working_dir: /app
+    command: ["python3", "src/bots/supervisor_shadow.py"]
+    environment:
+      ASSET: ETH
+      TIMEFRAME_MIN: "5"
+      THRESHOLD: "0.13"
+      REQUIRE_CONFIRM: "1"
+      SWEET_LO: "0.60"
+      SWEET_HI: "0.75"
+      MARKET_REFRESH_S: "60"
+      SNIPE_WINDOW_S: "300"
+      REQUIRE_WINDOW_ANCHOR: "1"
+      POLY_MAX_ORDER_USDC: "5"
+      VARIANT_SUFFIX: "via-supervisor"
+      SUPERVISOR_SHADOW_BOT_NAME: "eth-5m-via-supervisor"
+      SUPERVISOR_SHADOW_LOG_DIR: /app/polymarket/logs
+    volumes:
+      - ./polymarket/logs:/app/polymarket/logs
+
   # --- WS recorder: shared, captures orderbook for retroactive validation ---
 
   ws-recorder:
